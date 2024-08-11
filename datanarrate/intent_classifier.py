@@ -1,5 +1,6 @@
+import logging
 import os
-from typing import List
+from typing import List, Optional
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -14,26 +15,49 @@ class IntentClassification(BaseModel):
 
 
 class IntentClassifier:
-    def __init__(self, model_name: str = "gpt-4o-mini", **kwargs):
-        self.llm = ChatOpenAI(model_name=model_name, temperature=0, **kwargs)
+    def __init__(self, model_name: str = "gpt-4-mini", logger: Optional[logging.Logger] = None, **kwargs):
+        self.model_name = model_name
+        self.logger = logger or logging.getLogger(__name__)
+        self.llm = self._create_llm(model_name, **kwargs)
         self.output_parser = PydanticOutputParser(pydantic_object=IntentClassification)
-        self.prompt = ChatPromptTemplate.from_messages([
+        self.classification_chain = self._create_classification_chain()
+
+    def _create_llm(self, model_name: str, **kwargs) -> ChatOpenAI:
+        return ChatOpenAI(model_name=model_name, temperature=0, **kwargs)
+
+    def _create_classification_chain(self):
+        prompt = ChatPromptTemplate.from_messages([
             ("system", "Classify the user's intent based on their query. "
                        "Possible intents: data_retrieval, data_analysis, visualization, comparison, trend_analysis, prediction, explanation, summary. "
                        "Respond with the intent, confidence score, and a brief explanation. "
                        "Classification format: {format_instructions}"),
             ("human", "User query: {query}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
-        self.chain = self.prompt | self.llm | self.output_parser
+        return prompt | self.llm | self.output_parser
 
-    def classify(self, query: str) -> IntentClassification:
-        return self.chain.invoke({"query": query})
+    def classify(self, query: str) -> Optional[IntentClassification]:
+        try:
+            self.logger.info(f"Classifying intent for query: {query}")
+            classification = self.classification_chain.invoke({"query": query})
+            self.logger.info(f"Intent classified as: {classification.intent}")
+            return classification
+        except Exception as e:
+            self.logger.error(f"Error classifying intent: {e}", exc_info=True)
+            return None
 
-    def batch_classify(self, queries: List[str]) -> List[IntentClassification]:
-        return [self.classify(query) for query in queries]
+    def batch_classify(self, queries: List[str]) -> List[Optional[IntentClassification]]:
+        self.logger.info(f"Batch classifying {len(queries)} queries")
+        results = []
+        for query in queries:
+            result = self.classify(query)
+            results.append(result)
+        self.logger.info(
+            f"Batch classification completed. Successful: {sum(1 for r in results if r is not None)}, Failed: {sum(1 for r in results if r is None)}")
+        return results
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
                                   openai_api_key=os.environ["DEEPSEEK_API_KEY"])
     test_queries = [
@@ -46,8 +70,12 @@ if __name__ == "__main__":
 
     for query in test_queries:
         result = classifier.classify(query)
-        print(f"Query: {query}")
-        print(f"Intent: {result.intent}")
-        print(f"Confidence: {result.confidence}")
-        print(f"Explanation: {result.explanation}")
-        print("---")
+        if result:
+            print(f"Query: {query}")
+            print(f"Intent: {result.intent}")
+            print(f"Confidence: {result.confidence}")
+            print(f"Explanation: {result.explanation}")
+            print("---")
+        else:
+            print(f"Failed to classify query: {query}")
+            print("---")
