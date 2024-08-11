@@ -15,7 +15,7 @@ class IntentClassification(BaseModel):
 
 
 class IntentClassifier:
-    def __init__(self, model_name: str = "gpt-4-mini", logger: Optional[logging.Logger] = None, **kwargs):
+    def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
         self.model_name = model_name
         self.logger = logger or logging.getLogger(__name__)
         self.llm = self._create_llm(model_name, **kwargs)
