@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -12,6 +12,8 @@ from langchain_openai import ChatOpenAI
 class TaskStep(BaseModel):
     step_number: int = Field(description="The order of the step in the plan")
     description: str = Field(description="A clear, concise description of the step")
+    required_capability: str = Field(description="The high-level capability required for this step")
+    input_description: Dict[str, str] = Field(description="Description of required inputs for this step", default={})
 
 
 class TaskPlan(BaseModel):
@@ -34,10 +36,12 @@ class TaskPlanner:
     def _create_plan_chain(self):
         prompt = ChatPromptTemplate.from_messages([
             ("system", "Break down the given task into clear, actionable steps. "
-                       "Consider the user's intent and available tools. "
+                       "Consider the user's intent, current context, and available capabilities. "
+                       "For each step, specify the required high-level capability and describe any necessary inputs. "
+                       "Do not specify exact tool names, only describe the required capability. "
                        "Provide a plan with steps and reasoning. "
                        "Plan format: {format_instructions}"),
-            ("human", "Task: {task}\nIntent: {intent}\nAvailable tools: {tools}")
+            ("human", "Task: {task}\nIntent: {intent}\nAvailable capabilities: {capabilities}\nContext: {context}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
@@ -45,18 +49,20 @@ class TaskPlanner:
         prompt = ChatPromptTemplate.from_messages([
             ("system", "Revise the given plan based on the feedback provided. "
                        "Ensure the new plan addresses the feedback while maintaining the overall goal. "
+                       "For each step, specify the tool to be used and any necessary input parameters. "
                        "Plan format: {format_instructions}"),
             ("human", "Original plan: {original_plan}\nFeedback: {feedback}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
-    def create_plan(self, task: str, intent: str, tools: List[str]) -> Optional[TaskPlan]:
+    def create_plan(self, task: str, intent: str, capabilities: List[str], context: str) -> Optional[TaskPlan]:
         try:
             self.logger.info(f"Creating plan for task: {task}")
             plan = self.create_plan_chain.invoke({
                 "task": task,
                 "intent": intent,
-                "tools": ", ".join(tools)
+                "capabilities": ", ".join(capabilities),
+                "context": context
             })
             self.logger.info("Plan created successfully")
             return plan
@@ -84,9 +90,9 @@ if __name__ == "__main__":
 
     task = "Analyze our Q2 sales performance and visualize the top-performing products."
     intent = "data_analysis"
-    tools = ["SQL Query Tool", "Visualization Tool", "Storytelling Tool"]
+    capabilities = ["data_query", "data_analysis", "data_visualization"]
 
-    initial_plan = planner.create_plan(task, intent, tools)
+    initial_plan = planner.create_plan(task, intent, capabilities, "")
     if initial_plan:
         print("Initial Plan:")
         print(json.dumps(json.loads(initial_plan.json()), indent=2))

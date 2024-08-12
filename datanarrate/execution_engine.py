@@ -1,13 +1,22 @@
 import logging
+import os
 from typing import Any, Dict, Optional, List
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from task_planner import TaskStep
+from tool_selector import ToolSelector
+
 
 class ToolResult(BaseModel):
     output: Any = Field(description="The output of the tool execution")
     error: Optional[str] = Field(default=None, description="Error message if the execution failed")
+
+
+class StepResult(BaseModel):
+    step_number: int = Field(description="The number of the step in the plan")
+    result: ToolResult = Field(description="The result of the tool execution for this step")
 
 
 class ExecutionEngine:
@@ -33,26 +42,29 @@ class ExecutionEngine:
                     self.logger.error(f"Max retries reached for tool {tool.name}. Failing execution.")
                     return ToolResult(error=str(e))
 
-    def execute_plan(self, tools: Dict[str, BaseTool], plan: List[Dict[str, Any]]) -> Dict[str, ToolResult]:
+    def execute_step(self, step: TaskStep, tool: BaseTool, tool_input: Dict[str, Any]) -> StepResult:
+        """
+        Execute a single step from the plan.
+        """
+        result = self.execute_tool(tool, **tool_input)
+        return StepResult(step_number=step.step_number, result=result)
+
+    def execute_plan(self, plan: List[TaskStep], tool_selector: ToolSelector) -> List[StepResult]:
         """
         Execute a plan consisting of multiple tool executions.
         """
-        results = {}
+        results = []
         for step in plan:
-            tool_name = step.get("tool")
-            tool_input = step.get("tool_input", {})
+            tool_and_input = tool_selector.select_tool_for_step(step)
+            if not tool_and_input:
+                self.logger.error(f"No suitable tool found for step {step.step_number}")
+                break
+            tool, tool_input = tool_and_input
+            result = self.execute_step(step, tool, tool_input)
+            results.append(result)
 
-            tool = tools.get(tool_name)
-            if not tool:
-                self.logger.error(f"Tool {tool_name} not found for step {step}")
-                results[tool_name] = ToolResult(error=f"Tool {tool_name} not found")
-                continue
-
-            result = self.execute_tool(tool, **tool_input)
-            results[tool_name] = result
-
-            if result.error:
-                self.logger.warning(f"Step failed: {step}. Stopping plan execution.")
+            if result.result.error:
+                self.logger.warning(f"Step {result.step_number} failed: {step}. Stopping plan execution.")
                 break
 
         return results
@@ -61,6 +73,8 @@ class ExecutionEngine:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     engine = ExecutionEngine()
+    selector = ToolSelector("deepseek-chat", openai_api_base='https://api.deepseek.com',
+                            openai_api_key=os.environ["DEEPSEEK_API_KEY"])
 
 
     # Example tools
@@ -80,19 +94,30 @@ if __name__ == "__main__":
             return f"Created visualization for data: {data}"
 
 
-    tools = {
-        "SQL Query Tool": SQLQueryTool(),
-        "Visualization Tool": VisualizationTool()
-    }
+    class DataAnalysisTool(BaseTool):
+        name = "Data Analysis Tool"
+        description = "Performs statistical analysis on datasets"
+
+        def _run(self, dataset: str, analysis_type: str) -> str:
+            return f"Performed {analysis_type} analysis on {dataset}"
+
+
+    selector.register_tool(SQLQueryTool())
+    selector.register_tool(VisualizationTool())
+    selector.register_tool(DataAnalysisTool())
 
     plan = [
-        {"tool": "SQL Query Tool", "tool_input": {"query": "SELECT * FROM sales"}},
-        {"tool": "Visualization Tool", "tool_input": {"data": {"sales": 1000}}}
+        TaskStep(step_number=1, description="Query Q2 sales data", required_capability="data_query",
+                 input_description={"query": "Sales data for Q2"}),
+        TaskStep(step_number=2, description="Analyze top performers", required_capability="data_analysis",
+                 input_description={"dataset": "Q2 sales data", "analysis_type": "top performers"}),
+        TaskStep(step_number=3, description="Visualize top products", required_capability="data_visualization",
+                 input_description={"data": "Top 10 products by revenue"})
     ]
 
-    results = engine.execute_plan(tools, plan)
-    for tool_name, result in results.items():
-        if result.error:
-            print(f"{tool_name} failed: {result.error}")
+    results = engine.execute_plan(plan, selector)
+    for result in results:
+        if result.result.error:
+            print(f"Step {result.step_number} failed: {result.result.error}")
         else:
-            print(f"{tool_name} succeeded: {result.output}")
+            print(f"Step {result.step_number} succeeded: {result.result.output}")
