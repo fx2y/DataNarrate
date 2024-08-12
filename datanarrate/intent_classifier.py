@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI
 
 class IntentClassification(BaseModel):
     intents: List[str] = Field(description="The classified intents of the user's query")
-    confidence: float = Field(description="Overall confidence score of the classification (0-1)")
+    confidences: List[float] = Field(description="Confidence scores for each intent (0-1)")
     explanation: str = Field(description="Brief explanation of why these intents were chosen")
 
 
@@ -32,7 +32,7 @@ class IntentClassifier:
             ("system", "Classify the user's intents based on their query. "
                        f"Possible intents: {', '.join(self.intents)}. "
                        "A query may have multiple intents. List all relevant intents, "
-                       "provide an overall confidence score, and a brief explanation. "
+                       "provide a confidence score for each intent, and a brief explanation. "
                        "Classification format: {format_instructions}"),
             ("human", "User query: {query}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
@@ -78,7 +78,7 @@ if __name__ == "__main__":
         if result:
             print(f"Query: {query}")
             print(f"Intents: {result.intents}")
-            print(f"Confidence: {result.confidence}")
+            print(f"Confidences: {result.confidences}")
             print(f"Explanation: {result.explanation}")
             print("---")
         else:

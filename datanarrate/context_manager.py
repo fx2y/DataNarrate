@@ -17,6 +17,9 @@ class ConversationState(BaseModel):
     relevant_data: Dict[str, Any] = Field(default_factory=dict, description="Any relevant data for the current context")
     user_preferences: Dict[str, Any] = Field(default_factory=dict, description="User preferences for the conversation")
     conversation_history: List[Dict[str, str]] = Field(default_factory=list, description="History of the conversation")
+    current_intents: Optional[List[str]] = Field(default_factory=list, description="The current intents of the user")
+    intent_confidences: Optional[Dict[str, float]] = Field(default_factory=dict,
+                                                           description="The confidence of each current intent")
 
 
 class ContextManager:
@@ -99,17 +102,24 @@ class ContextManager:
         self.logger.info(f"Added {role} message to conversation history")
         self._save_checkpoint()
 
-    def get_context_summary(self) -> str:
+    def get_context_summary(self) -> Dict[str, Any]:
         """
         Generate a summary of the current context for use in prompts or decision-making.
         """
-        summary = f"Current task: {self.state.current_task}\n"
-        summary += f"Task progress: {self.state.task_progress * 100:.0f}%\n"
-        summary += f"Last tool used: {self.state.last_tool_used}\n"
-        summary += f"Relevant data: {', '.join(self.state.relevant_data.keys())}\n"
-        summary += f"User preferences: {self.state.user_preferences}\n"
-        summary += f"Conversation history: {len(self.state.conversation_history)} messages"
-        return summary
+        return {
+            "current_task": self.state.current_task,
+            "task_progress": f"{self.state.task_progress * 100:.0f}%",
+            "last_tool_used": self.state.last_tool_used,
+            "relevant_data": self.state.relevant_data,
+            "user_preferences": self.state.user_preferences,
+            "conversation_history": [
+                {"role": msg["role"],
+                 "content": msg["content"][:50] + "..." if len(msg["content"]) > 50 else msg["content"]}
+                for msg in self.state.conversation_history[-5:]  # Include last 5 messages
+            ],
+            "current_intents": self.state.current_intents,
+            "intent_confidences": self.state.intent_confidences,
+        }
 
     def _save_checkpoint(self):
         """
@@ -132,11 +142,20 @@ class ContextManager:
         else:
             self.logger.warning("No checkpoint found, using initial state")
 
-    def update_context(self, query: str, context: dict):
+    def update_context(self, query: str):
+        """
+        Update the context based on the current query.
+        """
         intent_classification = self.intent_classifier.classify(query)
-        context['current_intent'] = intent_classification.intent
-        context['intent_confidence'] = intent_classification.confidence
-        # ... other context updating logic ...
+        if intent_classification:
+            self.state.current_intents = intent_classification.intents
+            self.state.intent_confidences = dict(zip(intent_classification.intents, intent_classification.confidences))
+        else:
+            self.logger.warning("Failed to classify intents for the query")
+            self.state.current_intents = []
+            self.state.intent_confidences = {}
+        self.add_to_conversation_history("user", query)
+        self._save_checkpoint()
 
 
 if __name__ == "__main__":

@@ -21,8 +21,8 @@ class PlanAndExecute:
         self.llm = ChatOpenAI(model_name=model_name, temperature=0.2, **kwargs)
         self.intent_classifier = IntentClassifier(self.llm, logger=self.logger)
         self.query_analyzer = QueryAnalyzer(self.llm, logger=self.logger)
-        self.task_planner = TaskPlanner(self.llm, logger=self.logger)
         self.context_manager = ContextManager(self.intent_classifier, "plan_execute_thread")
+        self.task_planner = TaskPlanner(self.llm, self.context_manager, logger=self.logger)
         self.tool_selector = ToolSelector(self.llm, logger=self.logger)
         self.execution_engine = ExecutionEngine(self.intent_classifier, logger=self.logger)
         self.reasoning_engine = ReasoningEngine(self.llm, logger=self.logger)
@@ -73,9 +73,7 @@ class PlanAndExecute:
             if query_analysis is None:
                 raise ValueError("Failed to analyze query")
 
-            context = self.context_manager.get_context_summary()
-
-            task_plan = self.task_planner.plan_task(query_analysis, context)
+            task_plan = self.task_planner.plan_task(query_analysis)
             if task_plan is None:
                 raise ValueError("Failed to create task plan")
 
@@ -113,8 +111,7 @@ class PlanAndExecute:
         """
         try:
             self.logger.info("Replanning based on feedback")
-            context = self.context_manager.get_context_summary()
-            revised_plan = self.task_planner.replan(original_plan, feedback, context)
+            revised_plan = self.task_planner.replan(original_plan, feedback)
             self.logger.info(f"Generated revised plan with {len(revised_plan.steps)} steps")
             self.logger.info(f"Replanning reasoning: {revised_plan.reasoning}")
             return revised_plan
