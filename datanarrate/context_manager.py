@@ -1,9 +1,12 @@
 import logging
+import os
 from typing import Dict, Any, Optional, List
 
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
+
+from intent_classifier import IntentClassifier
 
 
 class ConversationState(BaseModel):
@@ -16,13 +19,15 @@ class ConversationState(BaseModel):
 
 
 class ContextManager:
-    def __init__(self, thread_id: str, checkpoint_ns: str = "", logger: Optional[logging.Logger] = None):
+    def __init__(self, intent_classifier: IntentClassifier, thread_id: str, checkpoint_ns: str = "",
+                 logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
         self.thread_id = thread_id
         self.checkpoint_ns = checkpoint_ns
         self.state = ConversationState()
         self.memory_saver = MemorySaver()
         self.config = self._create_config()
+        self.intent_classifier = intent_classifier
 
     def _create_config(self) -> RunnableConfig:
         return {
@@ -126,10 +131,18 @@ class ContextManager:
         else:
             self.logger.warning("No checkpoint found, using initial state")
 
+    def update_context(self, query: str, context: dict):
+        intent_classification = self.intent_classifier.classify(query)
+        context['current_intent'] = intent_classification.intent
+        context['intent_confidence'] = intent_classification.confidence
+        # ... other context updating logic ...
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    context_manager = ContextManager(thread_id="example_thread")
+    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
+                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    context_manager = ContextManager(classifier, thread_id="example_thread")
 
     # Example usage
     context_manager.update_state(current_task="Analyze Q2 sales data", task_progress=0.3,

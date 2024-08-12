@@ -20,6 +20,12 @@ class IntentClassifier:
         self.logger = logger or logging.getLogger(__name__)
         self.llm = self._create_llm(model_name, **kwargs)
         self.output_parser = PydanticOutputParser(pydantic_object=IntentClassification)
+        self.intents = [
+            "data_retrieval", "data_analysis", "visualization", "comparison",
+            "trend_analysis", "prediction", "explanation", "summary",
+            "anomaly_detection", "correlation_analysis", "what_if_analysis",
+            "root_cause_analysis", "recommendation"
+        ]
         self.classification_chain = self._create_classification_chain()
 
     def _create_llm(self, model_name: str, **kwargs) -> ChatOpenAI:
@@ -28,7 +34,7 @@ class IntentClassifier:
     def _create_classification_chain(self):
         prompt = ChatPromptTemplate.from_messages([
             ("system", "Classify the user's intent based on their query. "
-                       "Possible intents: data_retrieval, data_analysis, visualization, comparison, trend_analysis, prediction, explanation, summary. "
+                       f"Possible intents: {', '.join(self.intents)}. "
                        "Respond with the intent, confidence score, and a brief explanation. "
                        "Classification format: {format_instructions}"),
             ("human", "User query: {query}")

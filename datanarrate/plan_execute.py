@@ -17,7 +17,7 @@ class PlanAndExecute:
     def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
         self.logger = logger or logging.getLogger(__name__)
         self.intent_classifier = IntentClassifier(model_name, **kwargs)
-        self.task_planner = TaskPlanner(model_name, **kwargs)
+        self.task_planner = TaskPlanner(self.intent_classifier, model_name, **kwargs)
         self.context_manager = ContextManager("plan_execute_thread")
         self.tool_selector = ToolSelector(model_name, **kwargs)
         self.execution_engine = ExecutionEngine(logger=self.logger)

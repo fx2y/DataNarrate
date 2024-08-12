@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, List
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
 
+from intent_classifier import IntentClassifier
 from task_planner import TaskStep
 from tool_selector import ToolSelector
 
@@ -20,7 +21,9 @@ class StepResult(BaseModel):
 
 
 class ExecutionEngine:
-    def __init__(self, logger: Optional[logging.Logger] = None, max_retries: int = 3):
+    def __init__(self, intent_classifier: IntentClassifier, logger: Optional[logging.Logger] = None,
+                 max_retries: int = 3):
+        self.intent_classifier = intent_classifier
         self.logger = logger or logging.getLogger(__name__)
         self.max_retries = max_retries
 
@@ -69,10 +72,30 @@ class ExecutionEngine:
 
         return results
 
+    def execute(self, query: str, context: dict):
+        intent_classification = self.intent_classifier.classify(query)
+        if intent_classification.intent == "data_retrieval":
+            return self.execute_data_retrieval(query, context)
+        elif intent_classification.intent == "visualization":
+            return self.execute_visualization(query, context)
+        # ... handle other intents ...
+
+    def execute_data_retrieval(self, query: str, context: dict):
+        # Implementation for data retrieval
+        pass
+
+    def execute_visualization(self, query: str, context: dict):
+        # Implementation for visualization
+        pass
+
+    # ... other intent-specific execution methods ...
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    engine = ExecutionEngine()
+    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
+                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    engine = ExecutionEngine(classifier)
     selector = ToolSelector("deepseek-chat", openai_api_base='https://api.deepseek.com',
                             openai_api_key=os.environ["DEEPSEEK_API_KEY"])
 

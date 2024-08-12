@@ -8,6 +8,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
 
+from intent_classifier import IntentClassifier
+
 
 class TaskStep(BaseModel):
     step_number: int = Field(description="The order of the step in the plan")
@@ -22,7 +24,9 @@ class TaskPlan(BaseModel):
 
 
 class TaskPlanner:
-    def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
+    def __init__(self, intent_classifier: IntentClassifier, model_name: str = "gpt-4o-mini",
+                 logger: Optional[logging.Logger] = None, **kwargs):
+        self.intent_classifier = intent_classifier
         self.model_name = model_name
         self.logger = logger or logging.getLogger(__name__)
         self.llm = self._create_llm(model_name, **kwargs)
@@ -55,6 +59,11 @@ class TaskPlanner:
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
+    def plan_tasks(self, query: str):
+        intent_classification = self.intent_classifier.classify(query)
+        # Use the intent_classification to inform task planning
+        # ... implementation details ...
+
     def create_plan(self, task: str, intent: str, capabilities: List[str], context: str) -> Optional[TaskPlan]:
         try:
             self.logger.info(f"Creating plan for task: {task}")
@@ -85,7 +94,9 @@ class TaskPlanner:
 
 
 if __name__ == "__main__":
-    planner = TaskPlanner("deepseek-chat", openai_api_base='https://api.deepseek.com',
+    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
+                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    planner = TaskPlanner(classifier, "deepseek-chat", openai_api_base='https://api.deepseek.com',
                           openai_api_key=os.environ["DEEPSEEK_API_KEY"])
 
     task = "Analyze our Q2 sales performance and visualize the top-performing products."
