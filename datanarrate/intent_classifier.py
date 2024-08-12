@@ -9,16 +9,15 @@ from langchain_openai import ChatOpenAI
 
 
 class IntentClassification(BaseModel):
-    intent: str = Field(description="The classified intent of the user's query")
-    confidence: float = Field(description="Confidence score of the classification (0-1)")
-    explanation: str = Field(description="Brief explanation of why this intent was chosen")
+    intents: List[str] = Field(description="The classified intents of the user's query")
+    confidence: float = Field(description="Overall confidence score of the classification (0-1)")
+    explanation: str = Field(description="Brief explanation of why these intents were chosen")
 
 
 class IntentClassifier:
-    def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
-        self.model_name = model_name
+    def __init__(self, llm: ChatOpenAI, logger: Optional[logging.Logger] = None):
+        self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
-        self.llm = self._create_llm(model_name, **kwargs)
         self.output_parser = PydanticOutputParser(pydantic_object=IntentClassification)
         self.intents = [
             "data_retrieval", "data_analysis", "visualization", "comparison",
@@ -28,14 +27,12 @@ class IntentClassifier:
         ]
         self.classification_chain = self._create_classification_chain()
 
-    def _create_llm(self, model_name: str, **kwargs) -> ChatOpenAI:
-        return ChatOpenAI(model_name=model_name, temperature=0, **kwargs)
-
     def _create_classification_chain(self):
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "Classify the user's intent based on their query. "
+            ("system", "Classify the user's intents based on their query. "
                        f"Possible intents: {', '.join(self.intents)}. "
-                       "Respond with the intent, confidence score, and a brief explanation. "
+                       "A query may have multiple intents. List all relevant intents, "
+                       "provide an overall confidence score, and a brief explanation. "
                        "Classification format: {format_instructions}"),
             ("human", "User query: {query}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
@@ -43,12 +40,12 @@ class IntentClassifier:
 
     def classify(self, query: str) -> Optional[IntentClassification]:
         try:
-            self.logger.info(f"Classifying intent for query: {query}")
+            self.logger.info(f"Classifying intents for query: {query}")
             classification = self.classification_chain.invoke({"query": query})
-            self.logger.info(f"Intent classified as: {classification.intent}")
+            self.logger.info(f"Intents classified as: {classification.intents}")
             return classification
         except Exception as e:
-            self.logger.error(f"Error classifying intent: {e}", exc_info=True)
+            self.logger.error(f"Error classifying intents: {e}", exc_info=True)
             return None
 
     def batch_classify(self, queries: List[str]) -> List[Optional[IntentClassification]]:
@@ -64,8 +61,10 @@ class IntentClassifier:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
+                     openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    classifier = IntentClassifier(llm)
+
     test_queries = [
         "Show me the sales data for Q2",
         "What's the trend of customer acquisition over the last 6 months?",
@@ -78,7 +77,7 @@ if __name__ == "__main__":
         result = classifier.classify(query)
         if result:
             print(f"Query: {query}")
-            print(f"Intent: {result.intent}")
+            print(f"Intents: {result.intents}")
             print(f"Confidence: {result.confidence}")
             print(f"Explanation: {result.explanation}")
             print("---")

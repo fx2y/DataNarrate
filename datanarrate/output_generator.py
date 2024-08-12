@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Dict, Any, Optional, List
 
+from langchain_core.language_models import BaseLLM
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -17,15 +18,11 @@ class OutputFormat(BaseModel):
 
 
 class OutputGenerator:
-    def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
-        self.model_name = model_name
+    def __init__(self, llm: BaseLLM, logger: Optional[logging.Logger] = None, **kwargs):
+        self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
-        self.llm = self._create_llm(model_name, **kwargs)
         self.output_parser = PydanticOutputParser(pydantic_object=OutputFormat)
         self.generation_chain = self._create_generation_chain()
-
-    def _create_llm(self, model_name: str, **kwargs) -> ChatOpenAI:
-        return ChatOpenAI(model_name=model_name, temperature=0.2, **kwargs)
 
     def _create_generation_chain(self):
         prompt = ChatPromptTemplate.from_messages([
@@ -115,8 +112,9 @@ class OutputGenerator:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    generator = OutputGenerator("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                                openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
+                     openai_api_key=os.environ["DEEPSEEK_API_KEY"], temperature=0.2)
+    generator = OutputGenerator(llm)
 
     # Example usage
     context = "Analyzing Q2 sales data for top-performing products"

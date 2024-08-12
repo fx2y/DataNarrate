@@ -1,14 +1,14 @@
 import json
 import logging
 import os
-from typing import List, Optional, Dict
+from typing import List, Dict, Any
 
+from langchain_core.language_models import BaseLLM
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field
-from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-from intent_classifier import IntentClassifier
+from query_analyzer import QueryAnalysis
 
 
 class TaskStep(BaseModel):
@@ -16,6 +16,7 @@ class TaskStep(BaseModel):
     description: str = Field(description="A clear, concise description of the step")
     required_capability: str = Field(description="The high-level capability required for this step")
     input_description: Dict[str, str] = Field(description="Description of required inputs for this step", default={})
+    tools: List[str] = Field(description="List of tools that might be useful for this step", default=[])
 
 
 class TaskPlan(BaseModel):
@@ -24,94 +25,104 @@ class TaskPlan(BaseModel):
 
 
 class TaskPlanner:
-    def __init__(self, intent_classifier: IntentClassifier, model_name: str = "gpt-4o-mini",
-                 logger: Optional[logging.Logger] = None, **kwargs):
-        self.intent_classifier = intent_classifier
-        self.model_name = model_name
+    def __init__(self, llm: BaseLLM, logger: logging.Logger = None):
+        self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
-        self.llm = self._create_llm(model_name, **kwargs)
         self.output_parser = PydanticOutputParser(pydantic_object=TaskPlan)
-        self.create_plan_chain = self._create_plan_chain()
-        self.replan_chain = self._create_replan_chain()
-
-    def _create_llm(self, model_name: str, **kwargs) -> ChatOpenAI:
-        return ChatOpenAI(model_name=model_name, temperature=0.2, **kwargs)
+        self.plan_chain = self._create_plan_chain()
 
     def _create_plan_chain(self):
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "Break down the given task into clear, actionable steps. "
-                       "Consider the user's intent, current context, and available capabilities. "
-                       "For each step, specify the required high-level capability and describe any necessary inputs. "
-                       "Do not specify exact tool names, only describe the required capability. "
-                       "Provide a plan with steps and reasoning. "
-                       "Plan format: {format_instructions}"),
-            ("human", "Task: {task}\nIntent: {intent}\nAvailable capabilities: {capabilities}\nContext: {context}")
+            ("system", "You are a task planner for a data analysis system. "
+                       "Given a query analysis, create a detailed plan to accomplish the task. "
+                       "Consider the task type, sub-tasks, relevant intents, and potential tools. "
+                       "Ensure each step is clear and actionable. "
+                       "Output format: {format_instructions}"),
+            ("human", "Query Analysis: {query_analysis}\nContext: {context}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
-    def _create_replan_chain(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "Revise the given plan based on the feedback provided. "
-                       "Ensure the new plan addresses the feedback while maintaining the overall goal. "
-                       "For each step, specify the tool to be used and any necessary input parameters. "
-                       "Plan format: {format_instructions}"),
-            ("human", "Original plan: {original_plan}\nFeedback: {feedback}")
-        ]).partial(format_instructions=self.output_parser.get_format_instructions())
-        return prompt | self.llm | self.output_parser
-
-    def plan_tasks(self, query: str):
-        intent_classification = self.intent_classifier.classify(query)
-        # Use the intent_classification to inform task planning
-        # ... implementation details ...
-
-    def create_plan(self, task: str, intent: str, capabilities: List[str], context: str) -> Optional[TaskPlan]:
+    def plan_task(self, query_analysis: QueryAnalysis, context: Dict[str, Any]) -> TaskPlan:
         try:
-            self.logger.info(f"Creating plan for task: {task}")
-            plan = self.create_plan_chain.invoke({
-                "task": task,
-                "intent": intent,
-                "capabilities": ", ".join(capabilities),
-                "context": context
+            self.logger.info("Planning task based on query analysis")
+            plan = self.plan_chain.invoke({
+                "query_analysis": json.dumps(query_analysis.dict(), default=str),  # Use .dict() and json.dumps()
+                "context": str(context)
             })
-            self.logger.info("Plan created successfully")
+            self.logger.info(f"Task plan created: {plan}")
             return plan
         except Exception as e:
-            self.logger.error(f"Error creating plan: {e}", exc_info=True)
+            self.logger.error(f"Error planning task: {e}", exc_info=True)
             return None
 
-    def replan(self, original_plan: TaskPlan, feedback: str) -> Optional[TaskPlan]:
+    def replan(self, previous_plan: TaskPlan, feedback: str, context: Dict[str, Any]) -> TaskPlan:
         try:
-            self.logger.info("Replanning based on feedback")
-            revised_plan = self.replan_chain.invoke({
-                "original_plan": original_plan.json(),
-                "feedback": feedback
+            self.logger.info("Replanning task based on feedback")
+            replan_prompt = ChatPromptTemplate.from_messages([
+                ("system", "You are a task planner for a data analysis system. "
+                           "Given a previous plan and feedback, create an updated plan. "
+                           "Consider the feedback carefully and adjust the plan accordingly. "
+                           "Output format: {format_instructions}"),
+                ("human", "Previous Plan: {previous_plan}\nFeedback: {feedback}\nContext: {context}")
+            ]).partial(format_instructions=self.output_parser.get_format_instructions())
+
+            replan_chain = replan_prompt | self.llm | self.output_parser
+            updated_plan = replan_chain.invoke({
+                "previous_plan": json.dumps(previous_plan.dict(), default=str),  # Use .dict() and json.dumps()
+                "feedback": feedback,
+                "context": str(context)
             })
-            self.logger.info("Plan revised successfully")
-            return revised_plan
+            self.logger.info(f"Updated task plan created: {updated_plan}")
+            return updated_plan
         except Exception as e:
-            self.logger.error(f"Error replanning: {e}", exc_info=True)
+            self.logger.error(f"Error replanning task: {e}", exc_info=True)
             return None
 
 
 if __name__ == "__main__":
-    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
-    planner = TaskPlanner(classifier, "deepseek-chat", openai_api_base='https://api.deepseek.com',
-                          openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    from langchain_openai import ChatOpenAI
+    from query_analyzer import QueryAnalyzer
 
-    task = "Analyze our Q2 sales performance and visualize the top-performing products."
-    intent = "data_analysis"
-    capabilities = ["data_query", "data_analysis", "data_visualization"]
+    # Set up logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
 
-    initial_plan = planner.create_plan(task, intent, capabilities, "")
-    if initial_plan:
-        print("Initial Plan:")
-        print(json.dumps(json.loads(initial_plan.json()), indent=2))
+    # Initialize LLM
+    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
+                     openai_api_key=os.environ["DEEPSEEK_API_KEY"], temperature=0.2)
 
-        feedback = "We need to include a comparison with Q1 performance in the analysis."
-        revised_plan = planner.replan(initial_plan, feedback)
-        if revised_plan:
-            print("\nRevised Plan:")
-            print(json.dumps(json.loads(revised_plan.json()), indent=2))
+    # Initialize QueryAnalyzer and TaskPlanner
+    query_analyzer = QueryAnalyzer(llm, logger)
+    task_planner = TaskPlanner(llm, logger)
+
+    # Test the TaskPlanner
+    test_query = "Show me a bar chart of our top 5 selling products in Q2, including their revenue and compare it with last year's Q2 performance"
+    test_intents = ["data_visualization", "sales_analysis", "time_comparison"]
+
+    query_analysis = query_analyzer.analyze_query(test_query, test_intents)
+    context = {"user_role": "data analyst", "data_access_level": "full"}
+
+    if query_analysis:
+        task_plan = task_planner.plan_task(query_analysis, context)
+        if task_plan:
+            print("Initial Task Plan:")
+            for step in task_plan.steps:
+                print(f"Step {step.step_number}: {step.description}")
+                print(f"  Required Capability: {step.required_capability}")
+                print(f"  Tools: {', '.join(step.tools)}")
+            print(f"\nReasoning: {task_plan.reasoning}")
+
+            # Test replanning
+            feedback = "The plan looks good, but we need to add a step to check for any data anomalies before visualization."
+            updated_plan = task_planner.replan(task_plan, feedback, context)
+            if updated_plan:
+                print("\nUpdated Task Plan:")
+                for step in updated_plan.steps:
+                    print(f"Step {step.step_number}: {step.description}")
+                    print(f"  Required Capability: {step.required_capability}")
+                    print(f"  Tools: {', '.join(step.tools)}")
+                print(f"\nReasoning: {updated_plan.reasoning}")
+        else:
+            print("Task planning failed.")
     else:
-        print("Failed to create initial plan.")
+        print("Query analysis failed.")

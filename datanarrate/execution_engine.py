@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, List
 
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
+from langchain_openai import ChatOpenAI
 
 from intent_classifier import IntentClassifier
 from task_planner import TaskStep
@@ -93,11 +94,11 @@ class ExecutionEngine:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
+                     openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    classifier = IntentClassifier(llm)
     engine = ExecutionEngine(classifier)
-    selector = ToolSelector("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                            openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    selector = ToolSelector(llm)
 
 
     # Example tools

@@ -3,6 +3,7 @@ import logging
 import os
 from typing import List, Dict, Any, Optional, Tuple
 
+from langchain_core.language_models import BaseLLM
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -23,16 +24,12 @@ class ReasoningStrategy(BaseModel):
 
 
 class ReasoningEngine:
-    def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
-        self.model_name: str = model_name
+    def __init__(self, llm: BaseLLM, logger: Optional[logging.Logger] = None, **kwargs):
+        self.llm = llm
         self.logger: logging.Logger = logger or logging.getLogger(__name__)
-        self.llm: ChatOpenAI = self._create_llm(model_name, **kwargs)
         self.output_parser: PydanticOutputParser = PydanticOutputParser(pydantic_object=ReasoningOutput)
         self.strategies: Dict[str, ReasoningStrategy] = self._initialize_strategies()
         self.feedback_history: List[Tuple[ReasoningOutput, float]] = []
-
-    def _create_llm(self, model_name: str, **kwargs) -> ChatOpenAI:
-        return ChatOpenAI(model_name=model_name, temperature=0.2, **kwargs)
 
     def _initialize_strategies(self) -> Dict[str, ReasoningStrategy]:
         return {
@@ -130,8 +127,9 @@ class ReasoningEngine:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    engine = ReasoningEngine("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                             openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
+                     openai_api_key=os.environ["DEEPSEEK_API_KEY"], temperature=0.2)
+    engine = ReasoningEngine(llm)
 
     # Example usage
     task = "Analyze Q2 sales data and identify top-performing products"

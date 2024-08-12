@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional, List
 
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from intent_classifier import IntentClassifier
@@ -140,8 +141,9 @@ class ContextManager:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    classifier = IntentClassifier("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                                  openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
+                     openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    classifier = IntentClassifier(llm)
     context_manager = ContextManager(classifier, thread_id="example_thread")
 
     # Example usage

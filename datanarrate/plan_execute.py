@@ -3,11 +3,13 @@ import os
 from typing import Dict, Any, Optional
 
 from langchain_core.tools import BaseTool
+from langchain_openai import ChatOpenAI
 
 from context_manager import ContextManager
 from execution_engine import ExecutionEngine, StepResult
 from intent_classifier import IntentClassifier
 from output_generator import OutputGenerator
+from query_analyzer import QueryAnalyzer
 from reasoning_engine import ReasoningEngine
 from task_planner import TaskPlanner, TaskPlan, TaskStep
 from tool_selector import ToolSelector
@@ -16,13 +18,15 @@ from tool_selector import ToolSelector
 class PlanAndExecute:
     def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
         self.logger = logger or logging.getLogger(__name__)
-        self.intent_classifier = IntentClassifier(model_name, **kwargs)
-        self.task_planner = TaskPlanner(self.intent_classifier, model_name, **kwargs)
-        self.context_manager = ContextManager("plan_execute_thread")
-        self.tool_selector = ToolSelector(model_name, **kwargs)
-        self.execution_engine = ExecutionEngine(logger=self.logger)
-        self.reasoning_engine = ReasoningEngine(model_name, **kwargs)
-        self.output_generator = OutputGenerator(model_name, **kwargs)
+        self.llm = ChatOpenAI(model_name=model_name, temperature=0.2, **kwargs)
+        self.intent_classifier = IntentClassifier(self.llm, logger=self.logger)
+        self.query_analyzer = QueryAnalyzer(self.llm, logger=self.logger)
+        self.task_planner = TaskPlanner(self.llm, logger=self.logger)
+        self.context_manager = ContextManager(self.intent_classifier, "plan_execute_thread")
+        self.tool_selector = ToolSelector(self.llm, logger=self.logger)
+        self.execution_engine = ExecutionEngine(self.intent_classifier, logger=self.logger)
+        self.reasoning_engine = ReasoningEngine(self.llm, logger=self.logger)
+        self.output_generator = OutputGenerator(self.llm, logger=self.logger)
 
         # Initialize tool registry
         self.initialize_tool_registry()
@@ -60,11 +64,21 @@ class PlanAndExecute:
         """
         try:
             self.logger.info(f"Planning steps for task: {task}")
-            intent = self.intent_classifier.classify(task)
-            context = self.context_manager.get_context_summary()
-            available_capabilities = list(set(tool.description for tool in self.tool_selector.tool_registry.values()))
+            intent_classification = self.intent_classifier.classify(task)
+            if intent_classification is None:
+                raise ValueError("Failed to classify intents")
 
-            task_plan = self.task_planner.create_plan(task, intent.intent, available_capabilities, context)
+            intents = intent_classification.intents
+            query_analysis = self.query_analyzer.analyze_query(task, intents)
+            if query_analysis is None:
+                raise ValueError("Failed to analyze query")
+
+            context = self.context_manager.get_context_summary()
+
+            task_plan = self.task_planner.plan_task(query_analysis, context)
+            if task_plan is None:
+                raise ValueError("Failed to create task plan")
+
             self.context_manager.update_state(current_task=task)
 
             self.logger.info(f"Generated plan with {len(task_plan.steps)} steps")
@@ -100,7 +114,7 @@ class PlanAndExecute:
         try:
             self.logger.info("Replanning based on feedback")
             context = self.context_manager.get_context_summary()
-            revised_plan = self.task_planner.replan(original_plan, feedback)
+            revised_plan = self.task_planner.replan(original_plan, feedback, context)
             self.logger.info(f"Generated revised plan with {len(revised_plan.steps)} steps")
             self.logger.info(f"Replanning reasoning: {revised_plan.reasoning}")
             return revised_plan
@@ -154,6 +168,9 @@ if __name__ == "__main__":
         print("Initial Plan:")
         for step in initial_plan.steps:
             print(f"Step {step.step_number}: {step.description}")
+            print(f"  Required Capability: {step.required_capability}")
+            print(f"  Tools: {', '.join(step.tools)}")
+        print(f"\nReasoning: {initial_plan.reasoning}")
         print()
 
         # Execute the plan
@@ -164,9 +181,12 @@ if __name__ == "__main__":
         # Simulate feedback and replanning
         feedback = "We need to include a comparison with Q1 performance in the analysis."
         revised_plan = planner.replan_step(initial_plan, feedback)
-        print("Revised Plan:")
+        print("\nRevised Plan:")
         for step in revised_plan.steps:
             print(f"Step {step.step_number}: {step.description}")
+            print(f"  Required Capability: {step.required_capability}")
+            print(f"  Tools: {', '.join(step.tools)}")
+        print(f"\nReasoning: {revised_plan.reasoning}")
         print()
     except Exception as e:
         print(f"An error occurred: {e}")
