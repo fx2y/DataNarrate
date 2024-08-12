@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Dict, Any, Optional, List
 
-from langchain_core.language_models import BaseLLM
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -18,7 +18,7 @@ class OutputFormat(BaseModel):
 
 
 class OutputGenerator:
-    def __init__(self, llm: BaseLLM, logger: Optional[logging.Logger] = None, **kwargs):
+    def __init__(self, llm: BaseChatModel, logger: Optional[logging.Logger] = None, **kwargs):
         self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=OutputFormat)

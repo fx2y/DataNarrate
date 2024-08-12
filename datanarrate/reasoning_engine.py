@@ -1,13 +1,14 @@
 import json
 import logging
-import os
 from typing import List, Dict, Any, Optional, Tuple
 
-from langchain_core.language_models import BaseLLM
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
+
+from config import config
 
 
 class ReasoningOutput(BaseModel):
@@ -24,7 +25,7 @@ class ReasoningStrategy(BaseModel):
 
 
 class ReasoningEngine:
-    def __init__(self, llm: BaseLLM, logger: Optional[logging.Logger] = None, **kwargs):
+    def __init__(self, llm: BaseChatModel, logger: Optional[logging.Logger] = None, **kwargs):
         self.llm = llm
         self.logger: logging.Logger = logger or logging.getLogger(__name__)
         self.output_parser: PydanticOutputParser = PydanticOutputParser(pydantic_object=ReasoningOutput)
@@ -126,9 +127,13 @@ class ReasoningEngine:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
-                     openai_api_key=os.environ["DEEPSEEK_API_KEY"], temperature=0.2)
+    logging.basicConfig(level=config.LOG_LEVEL)
+    llm = ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY,
+        temperature=0.2
+    )
     engine = ReasoningEngine(llm)
 
     # Example usage

@@ -2,3 +2,7 @@ langchain
 langchain-openai
 langchain-community
 langgraph
+sqlalchemy
+pymysql
+environs
+elasticsearch

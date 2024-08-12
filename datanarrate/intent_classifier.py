@@ -1,11 +1,13 @@
 import logging
-import os
 from typing import List, Optional
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
+
+from config import config
 
 
 class IntentClassification(BaseModel):
@@ -15,7 +17,7 @@ class IntentClassification(BaseModel):
 
 
 class IntentClassifier:
-    def __init__(self, llm: ChatOpenAI, logger: Optional[logging.Logger] = None):
+    def __init__(self, llm: BaseChatModel, logger: Optional[logging.Logger] = None):
         self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=IntentClassification)
@@ -60,9 +62,12 @@ class IntentClassifier:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
-                     openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    logging.basicConfig(level=config.LOG_LEVEL)
+    llm = ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY
+    )
     classifier = IntentClassifier(llm)
 
     test_queries = [

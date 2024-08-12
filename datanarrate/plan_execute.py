@@ -1,27 +1,39 @@
 import logging
-import os
 from typing import Dict, Any, Optional
 
+from environs import Env
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
+from config import config
 from context_manager import ContextManager
 from execution_engine import ExecutionEngine, StepResult
 from intent_classifier import IntentClassifier
 from output_generator import OutputGenerator
 from query_analyzer import QueryAnalyzer
 from reasoning_engine import ReasoningEngine
+from schema_retriever import SchemaRetriever
 from task_planner import TaskPlanner, TaskPlan, TaskStep
 from tool_selector import ToolSelector
 
+env = Env()
+env.read_env()  # read .env file, if it exists
+
 
 class PlanAndExecute:
-    def __init__(self, model_name: str = "gpt-4o-mini", logger: Optional[logging.Logger] = None, **kwargs):
+    def __init__(self, model_name: str = None, logger: Optional[logging.Logger] = None, **kwargs):
         self.logger = logger or logging.getLogger(__name__)
-        self.llm = ChatOpenAI(model_name=model_name, temperature=0.2, **kwargs)
+        model_name = model_name or config.LLM_MODEL_NAME
+        self.llm = ChatOpenAI(
+            model_name=model_name,
+            temperature=0.2,
+            openai_api_base=config.OPENAI_API_BASE,
+            openai_api_key=config.OPENAI_API_KEY,
+            **kwargs
+        )
         self.intent_classifier = IntentClassifier(self.llm, logger=self.logger)
+        self.context_manager = ContextManager(self.intent_classifier, "plan_execute_thread", logger=self.logger)
         self.query_analyzer = QueryAnalyzer(self.llm, logger=self.logger)
-        self.context_manager = ContextManager(self.intent_classifier, "plan_execute_thread")
         self.task_planner = TaskPlanner(self.llm, self.context_manager, logger=self.logger)
         self.tool_selector = ToolSelector(self.llm, logger=self.logger)
         self.execution_engine = ExecutionEngine(self.intent_classifier, logger=self.logger)
@@ -30,6 +42,10 @@ class PlanAndExecute:
 
         # Initialize tool registry
         self.initialize_tool_registry()
+
+        # Initialize SchemaRetriever
+        self.schema_retriever = SchemaRetriever(logger=self.logger)
+        self.compressed_schema = None  # Will store the retrieved and compressed schema
 
     def initialize_tool_registry(self):
         # Define and register tools
@@ -58,6 +74,16 @@ class PlanAndExecute:
         self.tool_selector.register_tool(VisualizationTool())
         self.tool_selector.register_tool(DataAnalysisTool())
 
+    def retrieve_and_cache_compressed_schema(self):
+        if not self.compressed_schema:
+            unified_schema = self.schema_retriever.retrieve_unified_schema(
+                config.MYSQL_DATABASE,
+                config.ELASTICSEARCH_INDEX_PATTERN
+            )
+            self.compressed_schema = self.schema_retriever.compress_schema(unified_schema)
+            self.context_manager.update_schema_info(self.compressed_schema)
+        return self.compressed_schema
+
     def plan_step(self, task: str) -> TaskPlan:
         """
         Break down a complex task into a series of steps.
@@ -69,11 +95,12 @@ class PlanAndExecute:
                 raise ValueError("Failed to classify intents")
 
             intents = intent_classification.intents
-            query_analysis = self.query_analyzer.analyze_query(task, intents)
+            compressed_schema = self.retrieve_and_cache_compressed_schema()
+            query_analysis = self.query_analyzer.analyze_query(task, intents, compressed_schema)
             if query_analysis is None:
                 raise ValueError("Failed to analyze query")
 
-            task_plan = self.task_planner.plan_task(query_analysis)
+            task_plan = self.task_planner.plan_task(query_analysis, compressed_schema)
             if task_plan is None:
                 raise ValueError("Failed to create task plan")
 
@@ -97,7 +124,8 @@ class PlanAndExecute:
                 raise ValueError(f"No suitable tool found for step: {step.description}")
 
             tool, tool_input = tool_and_input
-            result = self.execution_engine.execute_step(step, tool, tool_input)
+            compressed_schema = self.retrieve_and_cache_compressed_schema()
+            result = self.execution_engine.execute_step(step, tool, tool_input, compressed_schema)
             self.context_manager.update_state(last_tool_used=tool.name)
             self.context_manager.add_relevant_data(f"step_{step.step_number}_result", result.result.output)
             return result
@@ -123,7 +151,8 @@ class PlanAndExecute:
         """
         Execute the entire plan and generate output.
         """
-        results = self.execution_engine.execute_plan(plan.steps, self.tool_selector)
+        compressed_schema = self.retrieve_and_cache_compressed_schema()
+        results = self.execution_engine.execute_plan(plan.steps, self.tool_selector, compressed_schema)
 
         for step_result in results:
             reasoning_output = self.reasoning_engine.reason(
@@ -139,7 +168,7 @@ class PlanAndExecute:
                 self.logger.info(f"Revised plan reasoning: {plan.reasoning}")
                 # Re-execute the plan from this step
                 remaining_steps = [step for step in plan.steps if step.step_number >= step_result.step_number]
-                new_results = self.execution_engine.execute_plan(remaining_steps, self.tool_selector)
+                new_results = self.execution_engine.execute_plan(remaining_steps, self.tool_selector, compressed_schema)
                 results = results[:step_result.step_number - 1] + new_results
 
         final_output = self.output_generator.generate_output(
@@ -152,12 +181,11 @@ class PlanAndExecute:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    planner = PlanAndExecute("deepseek-chat", openai_api_base='https://api.deepseek.com',
-                             openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    logging.basicConfig(level=config.LOG_LEVEL)
+    planner = PlanAndExecute()
 
     # Example usage
-    task = "Analyze Q2 sales data and create a visualization of top-performing products"
+    task = "Generate a heat map showing the Gini ratio across all regencies in Java provinces for the year 2024"
 
     # Generate and execute plan
     try:
@@ -176,7 +204,7 @@ if __name__ == "__main__":
         print(final_output)
 
         # Simulate feedback and replanning
-        feedback = "We need to include a comparison with Q1 performance in the analysis."
+        feedback = "Add a scatter plot showing the relationship between economic growth and inflation rates for all provinces in 2023."
         revised_plan = planner.replan_step(initial_plan, feedback)
         print("\nRevised Plan:")
         for step in revised_plan.steps:

@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Dict, Any, Optional, List
 
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -7,6 +6,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
+from config import config
 from intent_classifier import IntentClassifier
 
 
@@ -157,11 +157,22 @@ class ContextManager:
         self.add_to_conversation_history("user", query)
         self._save_checkpoint()
 
+    def update_schema_info(self, compressed_schema: Dict[str, Any]):
+        """
+        Update the schema information in the context.
+        """
+        self.state.relevant_data["schema_info"] = compressed_schema
+        self.logger.info("Updated schema information in context")
+        self._save_checkpoint()
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
-                     openai_api_key=os.environ["DEEPSEEK_API_KEY"])
+    logging.basicConfig(level=config.LOG_LEVEL)
+    llm = ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY
+    )
     classifier = IntentClassifier(llm)
     context_manager = ContextManager(classifier, thread_id="example_thread")
 

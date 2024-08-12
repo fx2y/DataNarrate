@@ -1,16 +1,19 @@
 import json
 import logging
-import os
 from typing import Dict, Optional, Any, Tuple
 
-from langchain_core.language_models import BaseLLM
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
-from task_planner import TaskStep
+from config import config
+from context_manager import ContextManager
+from datanarrate.intent_classifier import IntentClassifier
+from datanarrate.query_analyzer import QueryAnalyzer
+from task_planner import TaskStep, TaskPlanner
 
 
 class ToolSelection(BaseModel):
@@ -20,7 +23,7 @@ class ToolSelection(BaseModel):
 
 
 class ToolSelector:
-    def __init__(self, llm: BaseLLM, logger: Optional[logging.Logger] = None, **kwargs):
+    def __init__(self, llm: BaseChatModel, logger: Optional[logging.Logger] = None):
         self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=ToolSelection)
@@ -79,27 +82,47 @@ class ToolSelector:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
-                     openai_api_key=os.environ["DEEPSEEK_API_KEY"], temperature=0.2)
+    # Set up logging
+    logging.basicConfig(level=config.LOG_LEVEL)
+
+    # Initialize LLM
+    llm = ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY,
+        temperature=0.2
+    )
+
+    # Initialize components
+    intent_classifier = IntentClassifier(llm)
+    context_manager = ContextManager(intent_classifier, thread_id="example_thread")
+    query_analyzer = QueryAnalyzer(llm)
     selector = ToolSelector(llm)
 
 
-    # Register some example tools
+    # Register tools
     class SQLQueryTool(BaseTool):
         name = "SQL Query Tool"
-        description = "Executes SQL queries on a database"
+        description = "Executes SQL queries on a MySQL database"
 
         def _run(self, query: str) -> str:
             return f"Executed SQL query: {query}"
+
+
+    class ElasticsearchQueryTool(BaseTool):
+        name = "Elasticsearch Query Tool"
+        description = "Executes queries on Elasticsearch indices"
+
+        def _run(self, query: Dict[str, Any]) -> str:
+            return f"Executed Elasticsearch query: {json.dumps(query)}"
 
 
     class VisualizationTool(BaseTool):
         name = "Visualization Tool"
         description = "Creates data visualizations and charts"
 
-        def _run(self, data: Dict[str, Any]) -> str:
-            return f"Created visualization for data: {data}"
+        def _run(self, data: Dict[str, Any], chart_type: str) -> str:
+            return f"Created {chart_type} visualization for data: {json.dumps(data)}"
 
 
     class DataAnalysisTool(BaseTool):
@@ -111,39 +134,83 @@ if __name__ == "__main__":
 
 
     selector.register_tool(SQLQueryTool())
+    selector.register_tool(ElasticsearchQueryTool())
     selector.register_tool(VisualizationTool())
     selector.register_tool(DataAnalysisTool())
 
-    # Test the tool selector
-    example_steps = [
-        TaskStep(
-            step_number=1,
-            description="Retrieve the sales data for Q2 from our database",
-            required_capability="data_query",
-            input_description={"query": "Sales data for Q2"}
-        ),
-        TaskStep(
-            step_number=2,
-            description="Analyze the top 10 products by revenue",
-            required_capability="data_analysis",
-            input_description={"dataset": "Q2 sales data", "analysis_type": "top performers"}
-        ),
-        TaskStep(
-            step_number=3,
-            description="Create a bar chart of the top 10 products by revenue",
-            required_capability="data_visualization",
-            input_description={"data": "Top 10 products by revenue"}
-        )
-    ]
+    # Test the tool selector with a realistic scenario
+    test_query = "Show me a bar chart of our top 5 selling products in Q2, including their revenue and compare it with last year's Q2 performance"
 
-    for step in example_steps:
-        result = selector.select_tool_for_step(step)
-        if result:
-            tool, tool_input = result
-            print(f"Step {step.step_number}: {step.description}")
-            print(f"Selected Tool: {tool.name}")
-            print(f"Tool Input: {tool_input}")
-            print("---")
+    # Update context with the test query
+    context_manager.update_context(test_query)
+
+    compressed_schema = {
+        "mysql": {
+            "sales": ["date:dat", "product_id:int*", "customer_id:int", "quantity:int", "revenue:dec"],
+            "products": ["product_id:int*", "name:var", "category:var", "price:dec"],
+            "customers": ["customer_id:int*", "name:var", "location:var"]
+        },
+        "elasticsearch": {
+            "orders_index": {
+                "order_id": "key",
+                "date": "dat",
+                "customer": "nes",
+                "customer.id": "key",
+                "customer.name": "tex",
+                "customer.email": "tex",
+                "items": "nes",
+                "items.product_id": "key",
+                "items.name": "tex",
+                "items.quantity": "int",
+                "items.price": "flo",
+                "total_amount": "flo"
+            },
+            "product_index": {
+                "product_id": "key",
+                "name": "tex",
+                "category": "key",
+                "price": "flo",
+                "specifications": "nes",
+                "specifications.brand": "tex",
+                "specifications.model": "tex",
+                "specifications.year": "int"
+            }
+        }
+    }
+
+    # Analyze the query
+    query_analysis = query_analyzer.analyze_query(
+        test_query,
+        context_manager.get_state().current_intents,
+        compressed_schema
+    )
+
+    if query_analysis:
+        # Create a task plan
+        task_planner = TaskPlanner(llm, context_manager)
+        task_plan = task_planner.plan_task(query_analysis, compressed_schema)
+
+        if task_plan:
+            print("Task Plan:")
+            for step in task_plan.steps:
+                print(f"\nStep {step.step_number}: {step.description}")
+                print(f"Required Capability: {step.required_capability}")
+
+                # Select tool for the step
+                tool_selection = selector.select_tool_for_step(step)
+                if tool_selection:
+                    selected_tool, tool_input = tool_selection
+                    print(f"Selected Tool: {selected_tool.name}")
+                    print(f"Tool Input: {json.dumps(tool_input, indent=2)}")
+                else:
+                    print("Failed to select a tool for this step")
+
+                print("Data Sources:")
+                for data_source in step.data_sources:
+                    print(f"  - {data_source.name}:")
+                    print(f"    Tables/Indices: {', '.join(data_source.tables_or_indices)}")
+                    print(f"    Fields: {json.dumps(data_source.fields, indent=2)}")
         else:
-            print(f"Failed to select tool for step: {step.description}")
-            print("---")
+            print("Task planning failed.")
+    else:
+        print("Query analysis failed.")
