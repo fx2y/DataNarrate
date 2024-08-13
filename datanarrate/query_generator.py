@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 
 from config import config
 from datanarrate.task_planner import QueryInfo
+from query_validator import QueryValidator
 
 
 class SQLQuery(BaseModel):
@@ -24,11 +25,12 @@ class ElasticsearchQuery(BaseModel):
 
 
 class QueryGenerator:
-    def __init__(self, llm: BaseChatModel):
+    def __init__(self, llm: BaseChatModel, logger: Optional[logging.Logger] = None):
         self.llm = llm
         self.sql_output_parser = PydanticOutputParser(pydantic_object=SQLQuery)
         self.es_output_parser = PydanticOutputParser(pydantic_object=ElasticsearchQuery)
         self.logger = logging.getLogger(__name__)
+        self.query_validator = QueryValidator(logger=logger)
 
     def generate_sql_query(self, task: str, schema: Dict[str, Any], query_info: Optional[QueryInfo] = None) -> Optional[
         SQLQuery]:
@@ -48,7 +50,12 @@ class QueryGenerator:
             ))
             self.logger.debug(f"LLM response for SQL query: {result.content}")
             json_str = self._extract_json(result.content)
-            return self.sql_output_parser.parse(json_str)
+            generated_query = self.sql_output_parser.parse(json_str)
+            if self.query_validator.validate_query(generated_query.query, 'sql'):
+                return generated_query
+            else:
+                self.logger.warning("Generated SQL query failed validation")
+                return None
         except Exception as e:
             self.logger.error(f"Error generating SQL query: {e}")
             return None
@@ -79,8 +86,13 @@ class QueryGenerator:
                 try:
                     json_obj = json.loads(json_str)
                     # If successful, create an ElasticsearchQuery object
-                    return ElasticsearchQuery(query=json_obj.get('query', {}),
-                                              explanation=json_obj.get('explanation', ''))
+                    generated_query = ElasticsearchQuery(query=json_obj.get('query', {}),
+                                                         explanation=json_obj.get('explanation', ''))
+                    if self.query_validator.validate_query(generated_query.query, 'elasticsearch'):
+                        return generated_query
+                    else:
+                        self.logger.warning("Generated Elasticsearch query failed validation")
+                        return None
                 except json.JSONDecodeError as e:
                     self.logger.error(f"Failed to parse JSON: {e}")
                     return None

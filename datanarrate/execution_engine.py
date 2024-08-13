@@ -11,6 +11,7 @@ from datanarrate.context_manager import ContextManager
 from datanarrate.query_analyzer import QueryAnalyzer
 from intent_classifier import IntentClassifier
 from query_generator import QueryGenerator, SQLQuery, ElasticsearchQuery
+from query_validator import QueryValidator
 from task_planner import TaskStep, DataSource, TaskPlanner, QueryInfo
 from tool_selector import ToolSelector
 
@@ -37,6 +38,7 @@ class ExecutionEngine:
             openai_api_key=config.OPENAI_API_KEY,
             temperature=0.2
         ))
+        self.query_validator = QueryValidator(logger=logger)
 
     def execute_tool(self, tool: BaseTool, compressed_schema: Dict[str, Any], data_sources: List[DataSource],
                      task: str, query_info: Optional[QueryInfo] = None, **kwargs) -> ToolResult:
@@ -49,9 +51,13 @@ class ExecutionEngine:
                 self.logger.info(f"Executing tool: {tool.name}")
                 if tool.name == "SQL Query Tool":
                     query = self._generate_and_optimize_sql_query(task, compressed_schema, data_sources, query_info)
+                    if not self.query_validator.validate_query(query.query, 'sql'):
+                        raise ValueError("Invalid or unsafe SQL query")
                     result = tool.invoke({"query": query.query})
                 elif tool.name == "Elasticsearch Query Tool":
                     query = self._generate_and_optimize_es_query(task, compressed_schema, data_sources, query_info)
+                    if not self.query_validator.validate_query(query.query, 'elasticsearch'):
+                        raise ValueError("Invalid or unsafe Elasticsearch query")
                     result = tool.invoke({"query": query.query})
                 else:
                     result = tool.invoke(kwargs)

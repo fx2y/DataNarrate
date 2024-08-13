@@ -9,6 +9,7 @@ from langchain_core.pydantic_v1 import BaseModel, Field, validator
 
 from context_manager import ContextManager
 from query_analyzer import QueryAnalysis
+from query_validator import QueryValidator
 
 
 class DataSource(BaseModel):
@@ -56,6 +57,7 @@ class TaskPlanner:
         self.logger = logger or logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=TaskPlan)
         self.plan_chain = self._create_plan_chain()
+        self.query_validator = QueryValidator(logger=logger)
 
     def _create_plan_chain(self):
         prompt = ChatPromptTemplate.from_messages([
@@ -127,6 +129,17 @@ class TaskPlanner:
             order_by=self._infer_order_by(step.description),
             limit=self._infer_limit(step.description)
         )
+
+        # Validate the generated query info
+        if query_info.data_source == 'mysql':
+            dummy_query = f"SELECT {', '.join(query_info.fields)} FROM {', '.join(query_info.tables_or_indices)}"
+            if not self.query_validator.validate_query(dummy_query, 'sql'):
+                self.logger.warning("Generated query info might lead to an invalid SQL query")
+        elif query_info.data_source == 'elasticsearch':
+            dummy_query = {"query": {"match_all": {}}, "_source": query_info.fields}
+            if not self.query_validator.validate_query(dummy_query, 'elasticsearch'):
+                self.logger.warning("Generated query info might lead to an invalid Elasticsearch query")
+
         return query_info
 
     def _infer_query_type(self, description: str) -> str:

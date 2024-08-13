@@ -6,3 +6,5 @@ sqlalchemy
 pymysql
 environs
 elasticsearch
+sqlparse
+elasticsearch-dsl
