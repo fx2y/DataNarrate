@@ -2,9 +2,13 @@ import json
 import logging
 from typing import Any, Dict, Optional, List
 
+from elasticsearch import Elasticsearch
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 
 from config import config
 from datanarrate.context_manager import ContextManager
@@ -39,6 +43,8 @@ class ExecutionEngine:
             temperature=0.2
         ))
         self.query_validator = QueryValidator(logger=logger)
+        self.mysql_executor = MySQLExecutor()
+        self.elasticsearch_executor = ElasticsearchExecutor()
 
     def execute_tool(self, tool: BaseTool, compressed_schema: Dict[str, Any], data_sources: List[DataSource],
                      task: str, query_info: Optional[QueryInfo] = None, **kwargs) -> ToolResult:
@@ -49,26 +55,58 @@ class ExecutionEngine:
         while retries < self.max_retries:
             try:
                 self.logger.info(f"Executing tool: {tool.name}")
-                if tool.name == "SQL Query Tool":
-                    query = self._generate_and_optimize_sql_query(task, compressed_schema, data_sources, query_info)
-                    if not self.query_validator.validate_query(query.query, 'sql'):
-                        raise ValueError("Invalid or unsafe SQL query")
-                    result = tool.invoke({"query": query.query})
-                elif tool.name == "Elasticsearch Query Tool":
-                    query = self._generate_and_optimize_es_query(task, compressed_schema, data_sources, query_info)
-                    if not self.query_validator.validate_query(query.query, 'elasticsearch'):
-                        raise ValueError("Invalid or unsafe Elasticsearch query")
-                    result = tool.invoke({"query": query.query})
+
+                if tool.name.lower().startswith("sql"):
+                    return self.execute_mysql_query(query_info, compressed_schema, **kwargs)
+                elif tool.name.lower().startswith("elasticsearch"):
+                    return self.execute_elasticsearch_query(query_info, compressed_schema, **kwargs)
                 else:
+                    # Execute other tools as before
                     result = tool.invoke(kwargs)
-                self.logger.info(f"Tool executed successfully: {tool.name}")
-                return ToolResult(output=result)
+                    return ToolResult(output=result)
+
             except Exception as e:
+                self.logger.error(f"Error executing tool {tool.name}: {e}", exc_info=True)
                 retries += 1
-                self.logger.error(f"Error executing tool {tool.name}: {e}. Retry {retries}/{self.max_retries}")
                 if retries >= self.max_retries:
-                    self.logger.error(f"Max retries reached for tool {tool.name}. Failing execution.")
-                    return ToolResult(error=str(e))
+                    return ToolResult(error=f"Max retries reached. Last error: {str(e)}")
+
+    def execute_mysql_query(self, query_info: QueryInfo, compressed_schema: Dict[str, Any], **kwargs) -> ToolResult:
+        """
+        Execute a MySQL query using the query information provided.
+        """
+        try:
+            sql_query = self.query_generator.generate_sql_query(query_info, compressed_schema['mysql'])
+            if not isinstance(sql_query, SQLQuery):
+                return ToolResult(error="Failed to generate valid SQLQuery object")
+
+            if not self.query_validator.validate_sql_query(sql_query.query):
+                return ToolResult(error="Invalid SQL query generated")
+
+            result = self.mysql_executor.execute_query(sql_query)
+            return ToolResult(output=result)
+        except Exception as e:
+            self.logger.error(f"Error executing MySQL query: {e}", exc_info=True)
+            return ToolResult(error=f"MySQL query execution failed: {str(e)}")
+
+    def execute_elasticsearch_query(self, query_info: QueryInfo, compressed_schema: Dict[str, Any],
+                                    **kwargs) -> ToolResult:
+        """
+        Execute an Elasticsearch query using the query information provided.
+        """
+        try:
+            es_query = self.query_generator.generate_elasticsearch_query(query_info, compressed_schema['elasticsearch'])
+            if not isinstance(es_query, ElasticsearchQuery):
+                return ToolResult(error="Failed to generate valid ElasticsearchQuery object")
+
+            if not self.query_validator.validate_elasticsearch_query(es_query.query):
+                return ToolResult(error="Invalid Elasticsearch query generated")
+
+            result = self.elasticsearch_executor.execute_query(es_query)
+            return ToolResult(output=result)
+        except Exception as e:
+            self.logger.error(f"Error executing Elasticsearch query: {e}", exc_info=True)
+            return ToolResult(error=f"Elasticsearch query execution failed: {str(e)}")
 
     def _generate_and_optimize_sql_query(self, task: str, compressed_schema: Dict[str, Any],
                                          data_sources: List[DataSource], query_info: Optional[QueryInfo]) -> SQLQuery:
@@ -158,6 +196,45 @@ class ExecutionEngine:
         pass
 
     # ... other intent-specific execution methods ...
+
+
+class MySQLExecutor:
+    def __init__(self):
+        self.engine = create_engine(config.SQLALCHEMY_DATABASE_URI)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def execute_query(self, query: SQLQuery) -> Dict[str, Any]:
+        try:
+            with self.Session() as session:
+                sql_text = text(query.query)
+                print(f"Executing SQL query: {sql_text}")  # Debug print
+                result = session.execute(sql_text)
+                if query.query.strip().lower().startswith('select'):
+                    rows = [dict(row) for row in result]
+                    print(f"Query returned {len(rows)} rows")  # Debug print
+                    return {"result": rows}
+                else:
+                    session.commit()
+                    return {"result": "Query executed successfully"}
+        except SQLAlchemyError as e:
+            print(f"SQLAlchemy error: {str(e)}")  # Debug print
+            raise Exception(f"SQLAlchemy query execution failed: {str(e)}")
+
+
+class ElasticsearchExecutor:
+    def __init__(self):
+        self.client = Elasticsearch(
+            [config.ELASTICSEARCH_HOST],
+            basic_auth=(config.ELASTICSEARCH_USERNAME, config.ELASTICSEARCH_PASSWORD),
+            verify_certs=False
+        )
+
+    def execute_query(self, query: ElasticsearchQuery) -> Dict[str, Any]:
+        try:
+            result = self.client.search(index=query.index, body=query.query)
+            return {"result": result['hits']['hits']}
+        except Exception as e:
+            raise Exception(f"Elasticsearch query execution failed: {str(e)}")
 
 
 if __name__ == "__main__":
