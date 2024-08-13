@@ -96,7 +96,7 @@ if __name__ == "__main__":
     # Initialize components
     intent_classifier = IntentClassifier(llm)
     context_manager = ContextManager(intent_classifier, thread_id="example_thread")
-    query_analyzer = QueryAnalyzer(llm)
+    query_analyzer = QueryAnalyzer(llm, context_manager)
     selector = ToolSelector(llm)
 
 

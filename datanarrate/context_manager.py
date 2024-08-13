@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from config import config
+from datanarrate.query_analyzer import QueryAnalysis
 from intent_classifier import IntentClassifier
 
 
@@ -20,6 +21,7 @@ class ConversationState(BaseModel):
     current_intents: Optional[List[str]] = Field(default_factory=list, description="The current intents of the user")
     intent_confidences: Optional[Dict[str, float]] = Field(default_factory=dict,
                                                            description="The confidence of each current intent")
+    query_analysis: Optional[QueryAnalysis] = Field(default=None, description="The current query analysis")
 
 
 class ContextManager:

@@ -107,20 +107,26 @@ class SchemaRetriever:
             self.logger.error(f"Error retrieving Elasticsearch schema: {e}", exc_info=True)
             return ElasticsearchSchema(indices=[])
 
-    def _process_es_mappings(self, mappings: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+    def _process_es_mappings(self, mappings: Dict[str, Any], prefix: str = "", current_depth: int = 0) -> Dict[
+        str, Any]:
         processed = {}
+        max_depth = 1  # Set maximum depth to 1 levels
+
+        if current_depth > max_depth:
+            return {"_max_depth_reached": True}
+
         for field, properties in mappings.get("properties", {}).items():
             field_type = properties.get("type", "object")
-            full_field_name = f"{prefix}{field}"
-            if field_type == "nested":
+            full_field_name = f"{field}"
+
+            if field_type in ["nested", "object"] and current_depth < max_depth:
                 processed[full_field_name] = {
-                    "type": "nested",
-                    "properties": self._process_es_mappings(properties, f"{full_field_name}.")
+                    "type": field_type,
+                    "properties": self._process_es_mappings(properties, f"{full_field_name}.", current_depth + 1)
                 }
-            elif field_type == "object":
-                processed[full_field_name] = self._process_es_mappings(properties, f"{full_field_name}.")
             else:
                 processed[full_field_name] = {"type": field_type}
+
         return processed
 
     def retrieve_unified_schema(self, mysql_database: str, es_index_pattern: str) -> UnifiedSchema:
@@ -158,26 +164,32 @@ class SchemaRetriever:
             compressed[index.name] = self._compress_es_mappings(index.mappings)
         return compressed
 
-    def _compress_es_mappings(self, mappings: Dict[str, Any], prefix: str = "") -> Dict[str, str]:
+    def _compress_es_mappings(self, mappings: Dict[str, Any], prefix: str = "", current_depth: int = 0) -> Dict[
+        str, str]:
         compressed = {}
+        max_depth = 1  # Set maximum depth to 1 levels
+
+        if current_depth > max_depth:
+            return {"_max_depth_reached": "true"}
+
         for field, properties in mappings.items():
             full_field_name = f"{prefix}{field}"
             if 'type' in properties:
                 field_type = properties['type']
-                if field_type == "nested":
-                    compressed[full_field_name] = "nes"
-                    nested_fields = self._compress_es_mappings(properties.get("properties", {}), f"{full_field_name}.")
+                if field_type in ["nested", "object"] and current_depth < max_depth:
+                    # compressed[full_field_name] = "nes" if field_type == "nested" else "obj"
+                    nested_fields = self._compress_es_mappings(properties.get("properties", {}), f"{full_field_name}.",
+                                                               current_depth + 1)
                     compressed.update(nested_fields)
-                else:
+                elif field_type not in ["nested", "object"]:
                     compressed[full_field_name] = field_type[:3]
-            elif isinstance(properties, dict) and any(isinstance(v, dict) for v in properties.values()):
-                # This is an implicitly nested object
-                compressed[full_field_name] = "obj"
-                nested_fields = self._compress_es_mappings(properties, f"{full_field_name}.")
+            elif isinstance(properties, dict) and any(
+                    isinstance(v, dict) for v in properties.values()) and current_depth < max_depth:
+                # compressed[full_field_name] = "obj"
+                nested_fields = self._compress_es_mappings(properties, f"{full_field_name}.", current_depth + 1)
                 compressed.update(nested_fields)
-            else:
-                # This might be a field with additional properties, default to object
-                compressed[full_field_name] = "obj"
+            # else:
+            #     compressed[full_field_name] = "obj"
         return compressed
 
     def close_connections(self):

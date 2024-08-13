@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -32,9 +31,10 @@ class QueryAnalysis(BaseModel):
 
 
 class QueryAnalyzer:
-    def __init__(self, llm: BaseChatModel, logger: logging.Logger = None):
+    def __init__(self, llm: BaseChatModel, context_manager):
         self.llm = llm
-        self.logger = logger or logging.getLogger(__name__)
+        self.context_manager = context_manager
+        self.logger = logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=QueryAnalysis)
         self.analyze_chain = self._create_analyze_chain()
 
@@ -70,9 +70,13 @@ class QueryAnalyzer:
             analysis = self.analyze_chain.invoke({
                 "query": query,
                 "intents": ", ".join(intents),
-                "schema_info": json.dumps(compressed_schema, indent=2)
+                "schema_info": compressed_schema
             })
             self.logger.info(f"Query analysis completed: {analysis}")
+
+            # Store the analysis in the ContextManager
+            self.context_manager.update_state(query_analysis=analysis)
+
             return analysis
         except Exception as e:
             self.logger.error(f"Error analyzing query: {e}", exc_info=True)
@@ -129,8 +133,15 @@ if __name__ == "__main__":
         }
     }
 
-    # Initialize QueryAnalyzer
-    analyzer = QueryAnalyzer(llm, logger)
+
+    # For testing purposes, create a mock ContextManager
+    class MockContextManager:
+        def update_state(self, query_analysis):
+            print("Updating state with query analysis")
+
+
+    # Initialize QueryAnalyzer with mock ContextManager
+    analyzer = QueryAnalyzer(llm, MockContextManager())
 
     # Test the QueryAnalyzer with a query involving nested objects
     test_query = "Show me the top 5 customers who have spent the most on electronics products in Q2, including their order details and product specifications"

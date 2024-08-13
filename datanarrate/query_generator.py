@@ -1,7 +1,8 @@
+import json
 import logging
+import re
 from typing import Dict, Any, Optional, Union
 
-from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -9,6 +10,7 @@ from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
 
 from config import config
+from datanarrate.task_planner import QueryInfo
 
 
 class SQLQuery(BaseModel):
@@ -22,104 +24,89 @@ class ElasticsearchQuery(BaseModel):
 
 
 class QueryGenerator:
-    def __init__(self, llm: BaseChatModel, logger: Optional[logging.Logger] = None):
+    def __init__(self, llm: BaseChatModel):
         self.llm = llm
-        self.logger = logger or logging.getLogger(__name__)
         self.sql_output_parser = PydanticOutputParser(pydantic_object=SQLQuery)
         self.es_output_parser = PydanticOutputParser(pydantic_object=ElasticsearchQuery)
-        self.sql_chain = self._create_sql_chain()
-        self.es_chain = self._create_es_chain()
+        self.logger = logging.getLogger(__name__)
 
-    def _create_sql_chain(self):
+    def generate_sql_query(self, task: str, schema: Dict[str, Any], query_info: Optional[QueryInfo] = None) -> Optional[
+        SQLQuery]:
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert SQL query generator. Given a task description and schema information, "
-                       "generate an appropriate SQL query. Ensure the query is efficient and follows best practices. "
-                       "Output format: {format_instructions}"),
-            ("human", "Task: {task}\nSchema: {schema}\nGenerate an SQL query for this task.")
+            ("system",
+             "You are an expert SQL query generator. Generate an SQL query based on the given task, schema, and query information. "
+             "Ensure the query is correct and optimized. "
+             "Output format: {format_instructions}"),
+            ("human", "Task: {task}\nSchema: {schema}\nQuery Info: {query_info}")
         ]).partial(format_instructions=self.sql_output_parser.get_format_instructions())
-        return prompt | self.llm | self.sql_output_parser
 
-    def _create_es_chain(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert Elasticsearch query generator. Given a task description and index mapping, "
-                       "generate an appropriate Elasticsearch query. Ensure the query is efficient and follows best practices. "
-                       "Provide both the query and an explanation of how it works. "
-                       "Output format: {format_instructions}"),
-            ("human", "Task: {task}\nIndex Mapping: {mapping}\nGenerate an Elasticsearch query for this task.")
-        ]).partial(format_instructions=self.es_output_parser.get_format_instructions())
-        return prompt | self.llm | self.es_output_parser
-
-    def generate_sql_query(self, task: str, schema: Dict[str, Any]) -> Optional[SQLQuery]:
         try:
-            self.logger.info(f"Generating SQL query for task: {task}")
-            query = self.sql_chain.invoke({"task": task, "schema": schema})
-            self.logger.info(f"Generated SQL query: {query.query}")
-            return query
+            result = self.llm.invoke(prompt.format(
+                task=task,
+                schema=json.dumps(schema, indent=2),
+                query_info=json.dumps(query_info.dict() if query_info else {}, indent=2)
+            ))
+            self.logger.debug(f"LLM response for SQL query: {result.content}")
+            json_str = self._extract_json(result.content)
+            return self.sql_output_parser.parse(json_str)
         except Exception as e:
-            self.logger.error(f"Error generating SQL query: {e}", exc_info=True)
+            self.logger.error(f"Error generating SQL query: {e}")
             return None
 
-    def generate_elasticsearch_query(self, task: str, mapping: Dict[str, Any]) -> Optional[ElasticsearchQuery]:
+    def generate_elasticsearch_query(self, task: str, schema: Dict[str, Any], query_info: Optional[QueryInfo] = None) -> \
+            Optional[ElasticsearchQuery]:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "You are an expert Elasticsearch query generator. Generate an Elasticsearch query based on the given task, schema, and query information. "
+             "Ensure the query is correct and optimized. "
+             "Output format: {format_instructions}"),
+            ("human", "Task: {task}\nSchema: {schema}\nQuery Info: {query_info}")
+        ]).partial(format_instructions=self.es_output_parser.get_format_instructions())
+
         try:
-            self.logger.info(f"Generating Elasticsearch query for task: {task}")
-            result = self.es_chain.invoke({"task": task, "mapping": mapping})
+            result = self.llm.invoke(prompt.format(
+                task=task,
+                schema=json.dumps(schema, indent=2),
+                query_info=json.dumps(query_info.dict() if query_info else {}, indent=2)
+            ))
+            self.logger.debug(f"LLM response: {result.content}")
 
-            # Check if the explanation is missing and generate one if needed
-            if not hasattr(result, 'explanation') or not result.explanation:
-                self.logger.warning("Explanation missing from LLM output. Generating a default explanation.")
-                explanation = self._generate_default_explanation(result.query, task)
-                return ElasticsearchQuery(query=result.query, explanation=explanation)
-
-            self.logger.info(f"Generated Elasticsearch query: {result.query}")
-            return result
-        except OutputParserException as e:
-            self.logger.warning(f"OutputParserException: {e}. Attempting to salvage the query.")
-            # Try to extract the query from the error message
-            query_dict = self._extract_query_from_error(str(e))
-            if query_dict:
-                explanation = self._generate_default_explanation(query_dict, task)
-                return ElasticsearchQuery(query=query_dict, explanation=explanation)
+            # Extract the JSON part from the result
+            json_match = re.search(r'\{.*\}', result.content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                # Attempt to parse the JSON string
+                try:
+                    json_obj = json.loads(json_str)
+                    # If successful, create an ElasticsearchQuery object
+                    return ElasticsearchQuery(query=json_obj.get('query', {}),
+                                              explanation=json_obj.get('explanation', ''))
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse JSON: {e}")
+                    return None
             else:
-                self.logger.error("Failed to salvage the query.")
+                self.logger.error("No valid JSON found in the output")
                 return None
         except Exception as e:
-            self.logger.error(f"Error generating Elasticsearch query: {e}", exc_info=True)
+            self.logger.error(f"Error generating Elasticsearch query: {e}")
             return None
 
-    def _generate_default_explanation(self, query: Dict[str, Any], task: str) -> str:
-        # Generate a simple explanation based on the query structure
-        explanation = f"This query addresses the task: '{task}'. "
-        if 'bool' in query:
-            explanation += "It uses a bool query to apply filters. "
-        if 'range' in str(query):
-            explanation += "It includes a date range filter. "
-        if 'aggs' in query:
-            explanation += "It uses aggregations to calculate results. "
-        explanation += "Please review the query structure for more details."
-        return explanation
-
-    def _extract_query_from_error(self, error_message: str) -> Optional[Dict[str, Any]]:
-        import json
-        # Try to extract the query part from the error message
-        start = error_message.find('{')
-        end = error_message.rfind('}')
-        if start != -1 and end != -1:
-            try:
-                query_str = error_message[start:end + 1]
-                return json.loads(query_str)
-            except json.JSONDecodeError:
-                self.logger.error("Failed to parse query from error message.")
-        return None
-
-    def generate_query(self, task: str, data_source: str, schema_or_mapping: Dict[str, Any]) -> Optional[
-        Union[SQLQuery, ElasticsearchQuery]]:
+    def generate_query(self, task: str, data_source: str, schema_or_mapping: Dict[str, Any],
+                       query_info: Optional[QueryInfo] = None) -> Optional[Union[SQLQuery, ElasticsearchQuery]]:
         if data_source.lower() == "mysql":
-            return self.generate_sql_query(task, schema_or_mapping)
+            return self.generate_sql_query(task, schema_or_mapping, query_info)
         elif data_source.lower() == "elasticsearch":
-            return self.generate_elasticsearch_query(task, schema_or_mapping)
+            return self.generate_elasticsearch_query(task, schema_or_mapping, query_info)
         else:
             self.logger.error(f"Unsupported data source: {data_source}")
             return None
+
+    def _extract_json(self, text: str) -> str:
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            return json_match.group()
+        else:
+            raise ValueError("No valid JSON found in the output")
 
 
 if __name__ == "__main__":
@@ -144,6 +131,8 @@ if __name__ == "__main__":
         print(sql_query.query)
         print("Explanation:")
         print(sql_query.explanation)
+    else:
+        print("Failed to generate SQL query")
 
     # Test Elasticsearch query generation
     es_mapping = {
@@ -173,6 +162,8 @@ if __name__ == "__main__":
     es_query = query_generator.generate_query(es_task, "elasticsearch", es_mapping)
     if es_query:
         print("\nGenerated Elasticsearch Query:")
-        print(es_query.query)
+        print(json.dumps(es_query.query, indent=2))
         print("Explanation:")
         print(es_query.explanation)
+    else:
+        print("Failed to generate Elasticsearch query")

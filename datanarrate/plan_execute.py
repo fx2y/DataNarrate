@@ -33,7 +33,7 @@ class PlanAndExecute:
         )
         self.intent_classifier = IntentClassifier(self.llm, logger=self.logger)
         self.context_manager = ContextManager(self.intent_classifier, "plan_execute_thread", logger=self.logger)
-        self.query_analyzer = QueryAnalyzer(self.llm, logger=self.logger)
+        self.query_analyzer = QueryAnalyzer(self.llm, self.context_manager)
         self.task_planner = TaskPlanner(self.llm, self.context_manager, logger=self.logger)
         self.tool_selector = ToolSelector(self.llm, logger=self.logger)
         self.execution_engine = ExecutionEngine(self.intent_classifier, logger=self.logger)

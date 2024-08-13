@@ -10,7 +10,8 @@ from config import config
 from datanarrate.context_manager import ContextManager
 from datanarrate.query_analyzer import QueryAnalyzer
 from intent_classifier import IntentClassifier
-from task_planner import TaskStep, DataSource, TaskPlanner
+from query_generator import QueryGenerator, SQLQuery, ElasticsearchQuery
+from task_planner import TaskStep, DataSource, TaskPlanner, QueryInfo
 from tool_selector import ToolSelector
 
 
@@ -30,9 +31,15 @@ class ExecutionEngine:
         self.intent_classifier = intent_classifier
         self.logger = logger or logging.getLogger(__name__)
         self.max_retries = max_retries
+        self.query_generator = QueryGenerator(ChatOpenAI(
+            model_name=config.LLM_MODEL_NAME,
+            openai_api_base=config.OPENAI_API_BASE,
+            openai_api_key=config.OPENAI_API_KEY,
+            temperature=0.2
+        ))
 
     def execute_tool(self, tool: BaseTool, compressed_schema: Dict[str, Any], data_sources: List[DataSource],
-                     **kwargs) -> ToolResult:
+                     task: str, query_info: Optional[QueryInfo] = None, **kwargs) -> ToolResult:
         """
         Execute a given tool with the provided arguments.
         """
@@ -41,11 +48,11 @@ class ExecutionEngine:
             try:
                 self.logger.info(f"Executing tool: {tool.name}")
                 if tool.name == "SQL Query Tool":
-                    optimized_query = self._optimize_sql_query(kwargs['query'], compressed_schema, data_sources)
-                    result = tool.invoke({"query": optimized_query})
+                    query = self._generate_and_optimize_sql_query(task, compressed_schema, data_sources, query_info)
+                    result = tool.invoke({"query": query.query})
                 elif tool.name == "Elasticsearch Query Tool":
-                    optimized_query = self._optimize_es_query(kwargs['query'], compressed_schema, data_sources)
-                    result = tool.invoke({"query": optimized_query})
+                    query = self._generate_and_optimize_es_query(task, compressed_schema, data_sources, query_info)
+                    result = tool.invoke({"query": query.query})
                 else:
                     result = tool.invoke(kwargs)
                 self.logger.info(f"Tool executed successfully: {tool.name}")
@@ -57,42 +64,52 @@ class ExecutionEngine:
                     self.logger.error(f"Max retries reached for tool {tool.name}. Failing execution.")
                     return ToolResult(error=str(e))
 
-    def _optimize_sql_query(self, query: str, compressed_schema: Dict[str, Any], data_sources: List[DataSource]) -> str:
+    def _generate_and_optimize_sql_query(self, task: str, compressed_schema: Dict[str, Any],
+                                         data_sources: List[DataSource], query_info: Optional[QueryInfo]) -> SQLQuery:
         mysql_sources = [ds for ds in data_sources if ds.name == 'mysql']
         if not mysql_sources:
-            return query
+            raise ValueError("No MySQL data source found for SQL query generation")
 
-        # Implement SQL query optimization logic here
-        # Use data_sources[0].tables_or_indices and data_sources[0].fields to optimize the query
-        # For example:
-        # 1. Ensure all relevant tables are included in the FROM clause
-        # 2. Limit the SELECT statement to only include suggested fields
-        # 3. Add appropriate JOINs based on the relationships between relevant tables
-        # 4. Add WHERE clauses to filter data based on the query context
-        optimized_query = query  # Placeholder for actual optimization logic
-        return optimized_query
+        mysql_schema = compressed_schema.get('mysql', {})
+        query_result = self.query_generator.generate_sql_query(task, mysql_schema, query_info)
+        if query_result is None:
+            raise ValueError("Failed to generate SQL query")
 
-    def _optimize_es_query(self, query: Dict[str, Any], compressed_schema: Dict[str, Any],
-                           data_sources: List[DataSource]) -> Dict[str, Any]:
+        # Here you can add additional optimization logic if needed
+        return query_result
+
+    def _generate_and_optimize_es_query(self, task: str, compressed_schema: Dict[str, Any],
+                                        data_sources: List[DataSource],
+                                        query_info: Optional[QueryInfo]) -> ElasticsearchQuery:
         es_sources = [ds for ds in data_sources if ds.name == 'elasticsearch']
         if not es_sources:
-            return query
+            raise ValueError("No Elasticsearch data source found for query generation")
 
-        # Implement Elasticsearch query optimization logic here
-        # Use data_sources[0].tables_or_indices (indices in this case) and data_sources[0].fields to optimize the query
-        # For example:
-        # 1. Ensure the query targets only the relevant indices
-        # 2. Limit the fields returned to only the suggested fields
-        # 3. Add filters based on the query context
-        optimized_query = query  # Placeholder for actual optimization logic
-        return optimized_query
+        es_schema = compressed_schema.get('elasticsearch', {})
+        query_result = self.query_generator.generate_elasticsearch_query(task, es_schema, query_info)
+        if query_result is None:
+            raise ValueError("Failed to generate Elasticsearch query")
+
+        # Here you can add additional optimization logic if needed
+        return query_result
 
     def execute_step(self, step: TaskStep, tool: BaseTool, tool_input: Dict[str, Any],
                      compressed_schema: Dict[str, Any]) -> StepResult:
         """
         Execute a single step from the plan.
         """
-        result = self.execute_tool(tool, compressed_schema, step.data_sources, **tool_input)
+        execute_kwargs = tool_input.copy()  # Create a copy of tool_input to avoid modifying the original
+
+        # Add the task description for all tools
+        task = step.description
+
+        # For database-related tools, prepare query_info if it's not None
+        query_info = None
+        if tool.name in ["SQL Query Tool", "Elasticsearch Query Tool"] and step.query_info is not None:
+            query_info = step.query_info
+
+        result = self.execute_tool(tool, compressed_schema, step.data_sources, task=task, query_info=query_info,
+                                   **execute_kwargs)
         return StepResult(step_number=step.step_number, result=result)
 
     def execute_plan(self, plan: List[TaskStep], tool_selector: ToolSelector, compressed_schema: Dict[str, Any]) -> \
@@ -107,6 +124,8 @@ class ExecutionEngine:
                 self.logger.error(f"No suitable tool found for step {step.step_number}")
                 break
             tool, tool_input = tool_and_input
+
+            # Ensure the full compressed_schema is passed to execute_tool
             result = self.execute_step(step, tool, tool_input, compressed_schema)
             results.append(result)
 
@@ -148,7 +167,7 @@ if __name__ == "__main__":
     )
     classifier = IntentClassifier(llm)
     context_manager = ContextManager(classifier, thread_id="example_thread")
-    query_analyzer = QueryAnalyzer(llm)
+    query_analyzer = QueryAnalyzer(llm, context_manager)
     engine = ExecutionEngine(classifier)
     selector = ToolSelector(llm)
 
