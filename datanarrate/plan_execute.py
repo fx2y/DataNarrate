@@ -157,10 +157,19 @@ class PlanAndExecute:
         compressed_schema = self.retrieve_and_cache_compressed_schema()
         results = self.execution_engine.execute_plan(plan.steps, self.tool_selector, compressed_schema)
 
+        formatted_results = {}
         for step_result in results:
+            step_output = step_result.result.output
+            if isinstance(step_output, VisualizationSpec):
+                formatted_results[f"step_{step_result.step_number}"] = step_output
+            elif isinstance(step_output, dict):
+                formatted_results[f"step_{step_result.step_number}"] = step_output
+            else:
+                formatted_results[f"step_{step_result.step_number}"] = {"output": step_output}
+
             reasoning_output = self.reasoning_engine.reason(
                 self.context_manager.state.current_task,
-                {f"step_{step_result.step_number}": step_result.result.output},
+                {f"step_{step_result.step_number}": step_output},
                 list(self.tool_selector.tool_registry.keys())
             )
 
@@ -172,11 +181,18 @@ class PlanAndExecute:
                 # Re-execute the plan from this step
                 remaining_steps = [step for step in plan.steps if step.step_number >= step_result.step_number]
                 new_results = self.execution_engine.execute_plan(remaining_steps, self.tool_selector, compressed_schema)
-                results = results[:step_result.step_number - 1] + new_results
+                for new_result in new_results:
+                    new_step_output = new_result.result.output
+                    if isinstance(new_step_output, VisualizationSpec):
+                        formatted_results[f"step_{new_result.step_number}"] = new_step_output
+                    elif isinstance(new_step_output, dict):
+                        formatted_results[f"step_{new_result.step_number}"] = new_step_output
+                    else:
+                        formatted_results[f"step_{new_result.step_number}"] = {"output": new_step_output}
 
         final_output = self.output_generator.generate_output(
             self.context_manager.state.current_task,
-            {f"step_{r.step_number}": r.result.output for r in results},
+            formatted_results,
             self.context_manager.state.user_preferences.get("expertise", "general")
         )
 
