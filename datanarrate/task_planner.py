@@ -111,38 +111,50 @@ class TaskPlanner:
                 if query_analysis.time_range:
                     step.input_description["time_range"] = query_analysis.time_range
 
-    def replan(self, previous_plan: TaskPlan, feedback: str) -> Optional[TaskPlan]:
+    def replan(self, original_plan: TaskPlan, feedback: str, current_step: int) -> TaskPlan:
+        """
+        Revise the plan based on feedback and new context.
+        """
         try:
-            self.logger.info("Replanning task based on feedback")
-            context = self.context_manager.get_context_summary()
-            # Retrieve the compressed schema from the context manager
-            compressed_schema = self.context_manager.get_state().relevant_data.get("schema_info", {})
-            replan_prompt = ChatPromptTemplate.from_messages([
-                ("system", "You are a task planner for a data analysis system. "
-                           "Given a previous plan, feedback, and updated context, create an updated plan. "
-                           "Consider the feedback carefully and adjust the plan accordingly. "
-                           "For database-related steps, include detailed query information in the query_info field. "
-                           "Output format: {format_instructions}"),
-                ("human", "Previous Plan: {previous_plan}\nFeedback: {feedback}\nContext: {context}")
-            ]).partial(format_instructions=self.output_parser.get_format_instructions())
+            self.logger.info(f"Replanning based on feedback: {feedback}")
+            prompt = ChatPromptTemplate.from_messages([("system", """"
+            You are an AI task planner. You have been given an original plan and feedback about its execution.
+            Your task is to revise the plan, taking into account the feedback and the current execution state.
 
-            replan_chain = replan_prompt | self.llm | self.output_parser
-            updated_plan = replan_chain.invoke({
-                "previous_plan": json.dumps(previous_plan.dict(), default=str),
+            Original Plan:
+            {original_plan}
+
+            Feedback:
+            {feedback}
+
+            Current Step: {current_step}
+
+            Please create a revised plan. You can:
+            1. Modify existing steps
+            2. Add new steps
+            3. Remove steps
+            4. Reorder steps
+
+            Focus on addressing the issues raised in the feedback, but also consider the overall efficiency and effectiveness of the plan.
+            If possible, try to salvage and reuse parts of the original plan that are still valid.
+
+            Provide the revised plan in the same format as the original plan, along with a brief explanation of your changes.
+            """)]).partial(format_instructions=self.output_parser.get_format_instructions())
+
+            replan_chain = prompt | self.llm | self.output_parser
+            new_plan = replan_chain.invoke({
+                "original_plan": json.dumps(original_plan.dict(), indent=2),
                 "feedback": feedback,
-                "context": json.dumps(context, default=str)
+                "current_step": current_step
             })
-            # Retrieve the current query analysis from the context manager
-            current_query_analysis = self.context_manager.get_state().query_analysis
-            # Post-process the updated plan
-            self._post_process_plan(updated_plan, current_query_analysis,
-                                    compressed_schema)
 
-            self.logger.info(f"Updated task plan created: {updated_plan}")
-            return updated_plan
+            self.logger.info(f"Generated revised plan with {len(new_plan.steps)} steps")
+            self.logger.info(f"Replanning reasoning: {new_plan.reasoning}")
+
+            return new_plan
         except Exception as e:
-            self.logger.error(f"Error replanning task: {e}", exc_info=True)
-            return None
+            self.logger.error(f"Error in replan: {e}", exc_info=True)
+            return original_plan  # Return the original plan if replanning fails
 
     def update_context_with_plan(self, plan: TaskPlan):
         """
@@ -262,7 +274,7 @@ if __name__ == "__main__":
             feedback = "The plan looks good, but we need to add a step to check for any data anomalies before visualization."
             context_manager.add_to_conversation_history("user", feedback)
 
-            updated_plan = task_planner.replan(task_plan, feedback)
+            updated_plan = task_planner.replan(task_plan, feedback, current_step=1)
             if updated_plan:
                 print("\nUpdated Task Plan:")
                 for step in updated_plan.steps:

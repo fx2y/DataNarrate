@@ -156,13 +156,13 @@ class PlanAndExecute:
             self.logger.error(f"Error in execute_step: {e}", exc_info=True)
             raise
 
-    def replan_step(self, original_plan: TaskPlan, feedback: str) -> TaskPlan:
+    def replan_step(self, original_plan: TaskPlan, feedback: str, current_step: int) -> TaskPlan:
         """
         Revise the plan based on feedback and new context.
         """
         try:
             self.logger.info("Replanning based on feedback")
-            revised_plan = self.task_planner.replan(original_plan, feedback)
+            revised_plan = self.task_planner.replan(original_plan, feedback, current_step)
             self.logger.info(f"Generated revised plan with {len(revised_plan.steps)} steps")
             self.logger.info(f"Replanning reasoning: {revised_plan.reasoning}")
             return revised_plan
@@ -176,7 +176,19 @@ class PlanAndExecute:
         """
         compressed_schema = self.retrieve_and_cache_compressed_schema()
         results = []
-        for step in plan.steps:
+        step_number = 1
+        max_replans = 1  # Maximum number of replans allowed
+        replan_count = 0
+
+        while step_number <= len(plan.steps):
+            if replan_count >= max_replans:
+                user_feedback = self.ask_user_for_feedback()
+                if user_feedback.lower() == 'abort':
+                    self.logger.warning("Execution aborted by user")
+                    break
+                replan_count = 0  # Reset replan count after user feedback
+
+            step = plan.steps[step_number - 1]
             step_result = self.execute_step(step)
             results.append(step_result)
 
@@ -196,13 +208,14 @@ class PlanAndExecute:
                     f"Reasoning explanation: {reasoning_output.explanation}\n"
                     f"Please revise the plan considering this reasoning."
                 )
-                plan = self.replan_step(plan, feedback)
+                plan = self.replan_step(plan, feedback, current_step=step_number)
                 self.logger.info(f"Revised plan reasoning: {plan.reasoning}")
-                # Re-execute the plan from this step
-                remaining_steps = [s for s in plan.steps if s.step_number >= step_result.step_number]
-                for remaining_step in remaining_steps:
-                    new_result = self.execute_step(remaining_step)
-                    results.append(new_result)
+                # Start execution from the beginning of the new plan
+                step_number = 1
+                results = []
+                replan_count += 1
+            else:
+                step_number += 1
 
         formatted_results = {f"step_{result.step_number}": result.result.output for result in results}
 
@@ -239,6 +252,14 @@ class PlanAndExecute:
             complete_output["high_relevance_insights"] = high_relevance_insights
 
         return complete_output
+
+    def ask_user_for_feedback(self) -> str:
+        """
+        Ask the user for feedback when the maximum number of replans is reached.
+        """
+        print("The system has reached the maximum number of replanning attempts.")
+        print("Please provide feedback or type 'abort' to stop execution:")
+        return input().strip()
 
 
 if __name__ == "__main__":
