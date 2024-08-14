@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Dict, Any, Optional, List
 
 from langchain_core.language_models import BaseChatModel
@@ -8,13 +7,17 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
 
+from config import config
+from visualization_generator import VisualizationSpec
+
 
 class OutputFormat(BaseModel):
     summary: str = Field(description="A concise summary of the analysis results")
     key_points: List[str] = Field(description="List of key points from the analysis")
     narrative: str = Field(description="A narrative explanation of the results")
     next_steps: Optional[List[str]] = Field(description="Suggested next steps or follow-up questions", default=None)
-    visualizations: Optional[List[str]] = Field(description="Suggestions for relevant visualizations", default=None)
+    visualizations: Optional[List[VisualizationSpec]] = Field(description="List of visualization specifications",
+                                                              default=None)
 
 
 class OutputGenerator:
@@ -30,7 +33,7 @@ class OutputGenerator:
                        "Your task is to create clear, concise, and informative summaries "
                        "of analysis results. Adapt your language and detail level to the "
                        "user's expertise and the complexity of the data. "
-                       "Suggest relevant visualizations when appropriate. "
+                       "Incorporate visualization specifications when provided. "
                        "Output format: {format_instructions}"),
             ("human", "Context: {context}\nAnalysis results: {results}\n"
                       "User expertise: {user_expertise}\nUser preferences: {user_preferences}")
@@ -41,12 +44,26 @@ class OutputGenerator:
                         user_preferences: Dict[str, Any] = {}) -> OutputFormat:
         try:
             self.logger.info("Generating output for analysis results")
+
+            # Extract visualization specifications from results
+            visualizations = []
+            for step_result in results.values():
+                if isinstance(step_result, VisualizationSpec):
+                    visualizations.append(step_result)
+                elif isinstance(step_result, dict) and 'output' in step_result and isinstance(step_result['output'],
+                                                                                              VisualizationSpec):
+                    visualizations.append(step_result['output'])
+
             output = self.generation_chain.invoke({
                 "context": context,
                 "results": results,
                 "user_expertise": user_expertise,
                 "user_preferences": user_preferences
             })
+
+            # Add extracted visualization specifications to the output
+            output.visualizations = visualizations
+
             self.logger.info("Output generated successfully")
             return output
         except Exception as e:
@@ -75,9 +92,17 @@ class OutputGenerator:
         formatted += "Key Points:\n" + "\n".join(f"- {point}" for point in output.key_points) + "\n\n"
         formatted += f"Narrative: {output.narrative}\n\n"
         if output.next_steps:
-            formatted += "Next Steps:\n" + "\n".join(f"- {step}" for step in output.next_steps)
+            formatted += "Next Steps:\n" + "\n".join(f"- {step}" for step in output.next_steps) + "\n\n"
         if output.visualizations:
-            formatted += "Suggested Visualizations:\n" + "\n".join(f"- {viz}" for viz in output.visualizations)
+            formatted += "Visualizations:\n"
+            for i, viz in enumerate(output.visualizations, 1):
+                formatted += f"Visualization {i}:\n"
+                formatted += f"  Type: {viz.chart_type}\n"
+                formatted += f"  Title: {viz.title}\n"
+                if viz.x_axis:
+                    formatted += f"  X-axis: {viz.x_axis}\n"
+                if viz.y_axis:
+                    formatted += f"  Y-axis: {viz.y_axis}\n"
         return formatted
 
     def _format_as_html(self, output: OutputFormat) -> str:
@@ -93,10 +118,15 @@ class OutputGenerator:
                 html += f"<li>{step}</li>"
             html += "</ul>"
         if output.visualizations:
-            html += "<h2>Suggested Visualizations</h2><ul>"
-            for viz in output.visualizations:
-                html += f"<li>{viz}</li>"
-            html += "</ul>"
+            html += "<h2>Visualizations</h2>"
+            for i, viz in enumerate(output.visualizations, 1):
+                html += f"<h3>Visualization {i}</h3>"
+                html += f"<p>Type: {viz.chart_type}</p>"
+                html += f"<p>Title: {viz.title}</p>"
+                if viz.x_axis:
+                    html += f"<p>X-axis: {viz.x_axis}</p>"
+                if viz.y_axis:
+                    html += f"<p>Y-axis: {viz.y_axis}</p>"
         return html
 
     def _format_as_markdown(self, output: OutputFormat) -> str:
@@ -106,28 +136,49 @@ class OutputGenerator:
         if output.next_steps:
             markdown += "## Next Steps\n\n" + "\n".join(f"- {step}" for step in output.next_steps) + "\n\n"
         if output.visualizations:
-            markdown += "## Suggested Visualizations\n\n" + "\n".join(f"- {viz}" for viz in output.visualizations)
+            markdown += "## Visualizations\n\n"
+            for i, viz in enumerate(output.visualizations, 1):
+                markdown += f"### Visualization {i}\n\n"
+                markdown += f"- Type: {viz.chart_type}\n"
+                markdown += f"- Title: {viz.title}\n"
+                if viz.x_axis:
+                    markdown += f"- X-axis: {viz.x_axis}\n"
+                if viz.y_axis:
+                    markdown += f"- Y-axis: {viz.y_axis}\n"
+                markdown += "\n"
         return markdown
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    llm = ChatOpenAI(model_name="deepseek-chat", openai_api_base='https://api.deepseek.com',
-                     openai_api_key=os.environ["DEEPSEEK_API_KEY"], temperature=0.2)
+    llm = ChatOpenAI(model_name=config.LLM_MODEL_NAME, openai_api_base=config.OPENAI_API_BASE,
+                     openai_api_key=config.OPENAI_API_KEY, temperature=0.2)
     generator = OutputGenerator(llm)
 
     # Example usage
     context = "Analyzing Q2 sales data for top-performing products"
     results = {
-        "total_sales": 1000000,
-        "top_products": ["Product A", "Product B", "Product C"],
-        "growth_rate": 0.15,
-        "regional_performance": {"North": 0.3, "South": 0.2, "East": 0.25, "West": 0.25}
+        "step_1": {
+            "total_sales": 1000000,
+            "top_products": ["Product A", "Product B", "Product C"],
+            "growth_rate": 0.15,
+            "regional_performance": {"North": 0.3, "South": 0.2, "East": 0.25, "West": 0.25}
+        },
+        "step_2": VisualizationSpec(
+            chart_type="bar",
+            title="Top 5 Products by Revenue in Q2",
+            x_axis="Product",
+            y_axis="Revenue",
+            data_series=[{"Product A": 300000}, {"Product B": 250000}, {"Product C": 200000}, {"Product D": 150000},
+                         {"Product E": 100000}],
+            color_scheme=["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+        )
     }
     user_preferences = {"chart_type": "bar", "color_scheme": "blue"}
 
     output = generator.generate_output(context, results, user_expertise="business analyst",
                                        user_preferences=user_preferences)
+    print("Text Output:")
     print(generator.format_output(output, format_type="text"))
     print("\nHTML Output:")
     print(generator.format_output(output, format_type="html"))
