@@ -18,6 +18,7 @@ from query_generator import QueryGenerator, SQLQuery, ElasticsearchQuery
 from query_validator import QueryValidator
 from task_planner import TaskStep, DataSource, TaskPlanner, QueryInfo
 from tool_selector import ToolSelector
+from visualization_generator import VisualizationGenerator
 
 
 class ToolResult(BaseModel):
@@ -45,6 +46,7 @@ class ExecutionEngine:
         self.query_validator = QueryValidator(logger=logger)
         self.mysql_executor = MySQLExecutor()
         self.elasticsearch_executor = ElasticsearchExecutor()
+        self.visualization_generator = VisualizationGenerator(self.intent_classifier.llm, logger=self.logger)
 
     def execute_tool(self, tool: BaseTool, compressed_schema: Dict[str, Any], data_sources: List[DataSource],
                      task: str, query_info: Optional[QueryInfo] = None, **kwargs) -> ToolResult:
@@ -60,6 +62,9 @@ class ExecutionEngine:
                     return self.execute_mysql_query(query_info, compressed_schema, **kwargs)
                 elif tool.name.lower().startswith("elasticsearch"):
                     return self.execute_elasticsearch_query(query_info, compressed_schema, **kwargs)
+                elif tool.name == "Visualization Tool":
+                    return self._execute_visualization_tool(tool, compressed_schema, data_sources, task, query_info,
+                                                            **kwargs)
                 else:
                     # Execute other tools as before
                     result = tool.invoke(kwargs)
@@ -107,6 +112,25 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Error executing Elasticsearch query: {e}", exc_info=True)
             return ToolResult(error=f"Elasticsearch query execution failed: {str(e)}")
+
+    def _execute_visualization_tool(self, tool: BaseTool, compressed_schema: Dict[str, Any],
+                                    data_sources: List[DataSource],
+                                    task: str, query_info: Optional[QueryInfo] = None, **kwargs) -> ToolResult:
+        try:
+            self.logger.info(f"Generating visualization for task: {task}")
+            viz_spec = self.visualization_generator.generate_visualization(
+                data=kwargs.get("data", {}),
+                requirements=task,
+                user_preferences=kwargs.get("user_preferences", {})
+            )
+            if viz_spec and self.visualization_generator.validate_spec(viz_spec):
+                self.logger.info(f"Generated valid visualization specification for task: {task}")
+                return ToolResult(output=viz_spec)
+            else:
+                return ToolResult(error="Failed to generate a valid visualization specification")
+        except Exception as e:
+            self.logger.error(f"Error generating visualization for task {task}: {e}", exc_info=True)
+            return ToolResult(error=f"Error generating visualization: {str(e)}")
 
     def _generate_and_optimize_sql_query(self, task: str, compressed_schema: Dict[str, Any],
                                          data_sources: List[DataSource], query_info: Optional[QueryInfo]) -> SQLQuery:
