@@ -15,6 +15,7 @@ from reasoning_engine import ReasoningEngine
 from schema_retriever import SchemaRetriever
 from task_planner import TaskPlanner, TaskPlan, TaskStep
 from tool_selector import ToolSelector
+from visualization_generator import VisualizationGenerator, VisualizationSpec
 
 env = Env()
 env.read_env()  # read .env file, if it exists
@@ -36,6 +37,7 @@ class PlanAndExecute:
         self.query_analyzer = QueryAnalyzer(self.llm, self.context_manager)
         self.task_planner = TaskPlanner(self.llm, self.context_manager, logger=self.logger)
         self.tool_selector = ToolSelector(self.llm, logger=self.logger)
+        self.visualization_generator = VisualizationGenerator(self.llm, logger=self.logger)
         self.execution_engine = ExecutionEngine(self.intent_classifier, logger=self.logger)
         self.reasoning_engine = ReasoningEngine(self.llm, logger=self.logger)
         self.output_generator = OutputGenerator(self.llm, logger=self.logger)
@@ -60,8 +62,9 @@ class PlanAndExecute:
             name = "Visualization Tool"
             description = "Creates data visualizations and charts"
 
-            def _run(self, data: Dict[str, Any]) -> str:
-                return f"Created visualization for data: {data}"
+            def _run(self, data: Dict[str, Any], requirements: str,
+                     user_preferences: Dict[str, Any]) -> VisualizationSpec:
+                return self.visualization_generator.generate_visualization(data, requirements, user_preferences)
 
         class DataAnalysisTool(BaseTool):
             name = "Data Analysis Tool"
