@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Dict, Any, Optional
 
@@ -7,18 +8,36 @@ from langchain_openai import ChatOpenAI
 
 from config import config
 from context_manager import ContextManager
-from execution_engine import ExecutionEngine, StepResult
+from execution_engine import ExecutionEngine, StepResult, ToolResult
 from intent_classifier import IntentClassifier
 from output_generator import OutputGenerator
 from query_analyzer import QueryAnalyzer
 from reasoning_engine import ReasoningEngine
 from schema_retriever import SchemaRetriever
+from storyline_creator import StorylineCreator  # New import
 from task_planner import TaskPlanner, TaskPlan, TaskStep
 from tool_selector import ToolSelector
 from visualization_generator import VisualizationGenerator, VisualizationSpec
 
 env = Env()
 env.read_env()  # read .env file, if it exists
+
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, VisualizationSpec):
+            return obj.dict()
+        elif isinstance(obj, StepResult):
+            return {
+                "step_number": obj.step_number,
+                "result": self.default(obj.result)
+            }
+        elif isinstance(obj, ToolResult):
+            return {
+                "output": self.default(obj.output),
+                "error": obj.error
+            }
+        return super().default(obj)
 
 
 class PlanAndExecute:
@@ -41,6 +60,7 @@ class PlanAndExecute:
         self.execution_engine = ExecutionEngine(self.intent_classifier, logger=self.logger)
         self.reasoning_engine = ReasoningEngine(self.llm, logger=self.logger)
         self.output_generator = OutputGenerator(self.llm, logger=self.logger)
+        self.storyline_creator = StorylineCreator(self.llm, logger=self.logger)  # New attribute
 
         # Initialize tool registry
         self.initialize_tool_registry()
@@ -160,16 +180,11 @@ class PlanAndExecute:
         formatted_results = {}
         for step_result in results:
             step_output = step_result.result.output
-            if isinstance(step_output, VisualizationSpec):
-                formatted_results[f"step_{step_result.step_number}"] = step_output
-            elif isinstance(step_output, dict):
-                formatted_results[f"step_{step_result.step_number}"] = step_output
-            else:
-                formatted_results[f"step_{step_result.step_number}"] = {"output": step_output}
+            formatted_results[f"step_{step_result.step_number}"] = step_output
 
             reasoning_output = self.reasoning_engine.reason(
                 self.context_manager.state.current_task,
-                {f"step_{step_result.step_number}": step_output},
+                json.loads(json.dumps({f"step_{step_result.step_number}": step_output}, cls=CustomJSONEncoder)),
                 list(self.tool_selector.tool_registry.keys())
             )
 
@@ -182,21 +197,44 @@ class PlanAndExecute:
                 remaining_steps = [step for step in plan.steps if step.step_number >= step_result.step_number]
                 new_results = self.execution_engine.execute_plan(remaining_steps, self.tool_selector, compressed_schema)
                 for new_result in new_results:
-                    new_step_output = new_result.result.output
-                    if isinstance(new_step_output, VisualizationSpec):
-                        formatted_results[f"step_{new_result.step_number}"] = new_step_output
-                    elif isinstance(new_step_output, dict):
-                        formatted_results[f"step_{new_result.step_number}"] = new_step_output
-                    else:
-                        formatted_results[f"step_{new_result.step_number}"] = {"output": new_step_output}
+                    formatted_results[f"step_{new_result.step_number}"] = new_result.result.output
 
         final_output = self.output_generator.generate_output(
             self.context_manager.state.current_task,
-            formatted_results,
+            json.loads(json.dumps(formatted_results, cls=CustomJSONEncoder)),
             self.context_manager.state.user_preferences.get("expertise", "general")
         )
 
-        return final_output.dict()
+        # Generate storyline
+        context = self.context_manager.state.current_task
+        audience = self.context_manager.state.user_preferences.get("audience", "general")
+        storyline = self.storyline_creator.create_storyline(formatted_results, context, audience)
+
+        # Create a dictionary to hold the final output and storyline
+        complete_output = {
+            "output": final_output,
+            "storyline": None
+        }
+
+        if storyline and self.storyline_creator.validate_storyline(storyline):
+            self.logger.info("Valid storyline generated and added to final output")
+            complete_output["storyline"] = storyline.dict()
+        else:
+            self.logger.warning("Failed to generate a valid storyline")
+
+        # Further processing or analysis of the storyline can be added here
+        if complete_output["storyline"]:
+            self.logger.info(f"Storyline title: {complete_output['storyline']['title']}")
+            self.logger.info(f"Number of key insights: {len(complete_output['storyline']['key_insights'])}")
+
+            # Example of further processing: Extracting high-relevance insights
+            high_relevance_insights = [
+                insight for insight in complete_output['storyline']['key_insights']
+                if insight['relevance'] > 0.8
+            ]
+            complete_output["high_relevance_insights"] = high_relevance_insights
+
+        return complete_output
 
 
 if __name__ == "__main__":
@@ -218,9 +256,14 @@ if __name__ == "__main__":
         print()
 
         # Execute the plan
-        final_output = planner.execute_plan(initial_plan)
+        complete_output = planner.execute_plan(initial_plan)
         print("Final Output:")
-        print(final_output)
+        print(complete_output["output"])
+        if complete_output["storyline"]:
+            print("\nStoryline:")
+            print(f"Title: {complete_output['storyline']['title']}")
+            print(f"Summary: {complete_output['storyline']['summary']}")
+            # ... (print other storyline details as needed)
 
         # Simulate feedback and replanning
         feedback = "Add a scatter plot showing the relationship between economic growth and inflation rates for all provinces in 2023."

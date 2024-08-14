@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -44,6 +45,17 @@ class StorylineCreator:
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
+    def _serialize_results(self, results: Dict[str, Any]) -> str:
+        def custom_serializer(obj):
+            if hasattr(obj, 'dict'):
+                return obj.dict()
+            elif hasattr(obj, '__dict__'):
+                return obj.__dict__
+            else:
+                return str(obj)
+
+        return json.dumps(results, default=custom_serializer)
+
     def create_storyline(self, results: Dict[str, Any], context: str, audience: str) -> Optional[Storyline]:
         try:
             self.logger.info("Generating data storyline")
@@ -51,8 +63,11 @@ class StorylineCreator:
             self.logger.debug(f"Context: {context}")
             self.logger.debug(f"Audience: {audience}")
 
+            # Convert results to a string representation using custom serialization
+            results_str = self._serialize_results(results)
+
             storyline = self.generation_chain.invoke({
-                "results": results,
+                "results": results_str,
                 "context": context,
                 "audience": audience
             })
