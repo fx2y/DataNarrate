@@ -16,7 +16,7 @@ from datanarrate.query_analyzer import QueryAnalyzer
 from intent_classifier import IntentClassifier
 from query_generator import QueryGenerator, SQLQuery, ElasticsearchQuery
 from query_validator import QueryValidator
-from task_planner import TaskStep, DataSource, TaskPlanner, QueryInfo
+from task_planner import TaskStep, DataSource, QueryInfo
 from tool_selector import ToolSelector
 from visualization_generator import VisualizationGenerator
 
@@ -180,29 +180,6 @@ class ExecutionEngine:
                                    **execute_kwargs)
         return StepResult(step_number=step.step_number, result=result)
 
-    def execute_plan(self, plan: List[TaskStep], tool_selector: ToolSelector, compressed_schema: Dict[str, Any]) -> \
-            List[StepResult]:
-        """
-        Execute a plan consisting of multiple tool executions.
-        """
-        results = []
-        for step in plan:
-            tool_and_input = tool_selector.select_tool_for_step(step)
-            if not tool_and_input:
-                self.logger.error(f"No suitable tool found for step {step.step_number}")
-                break
-            tool, tool_input = tool_and_input
-
-            # Ensure the full compressed_schema is passed to execute_tool
-            result = self.execute_step(step, tool, tool_input, compressed_schema)
-            results.append(result)
-
-            if result.result.error:
-                self.logger.warning(f"Step {result.step_number} failed: {step}. Stopping plan execution.")
-                break
-
-        return results
-
     def execute(self, query: str, context: dict):
         intent_classification = self.intent_classifier.classify(query)
         if intent_classification.intent == "data_retrieval":
@@ -265,7 +242,7 @@ if __name__ == "__main__":
     # Set up logging
     logging.basicConfig(level=config.LOG_LEVEL)
 
-    # Initialize LLM
+    # Initialize components
     llm = ChatOpenAI(
         model_name=config.LLM_MODEL_NAME,
         openai_api_base=config.OPENAI_API_BASE,
@@ -279,7 +256,7 @@ if __name__ == "__main__":
     selector = ToolSelector(llm)
 
 
-    # Example tools
+    # Example tools (these should match the tools in PlanAndExecute)
     class SQLQueryTool(BaseTool):
         name = "SQL Query Tool"
         description = "Executes SQL queries on a MySQL database"
@@ -300,8 +277,8 @@ if __name__ == "__main__":
         name = "Visualization Tool"
         description = "Creates data visualizations and charts"
 
-        def _run(self, data: Dict[str, Any]) -> str:
-            return f"Created visualization for data: {data}"
+        def _run(self, data: Dict[str, Any], requirements: str, user_preferences: Dict[str, Any]) -> str:
+            return f"Created visualization for data: {data}, requirements: {requirements}, preferences: {user_preferences}"
 
 
     class DataAnalysisTool(BaseTool):
@@ -312,17 +289,13 @@ if __name__ == "__main__":
             return f"Performed {analysis_type} analysis on {dataset}"
 
 
+    # Register tools
     selector.register_tool(SQLQueryTool())
     selector.register_tool(ElasticsearchQueryTool())
     selector.register_tool(VisualizationTool())
     selector.register_tool(DataAnalysisTool())
 
-    # Test the tool selector with a realistic scenario
-    test_query = "Show me a bar chart of our top 5 selling products in Q2, including their revenue and compare it with last year's Q2 performance"
-
-    # Update context with the test query
-    context_manager.update_context(test_query)
-
+    # Example compressed schema (this should match the schema in PlanAndExecute)
     compressed_schema = {
         "mysql": {
             "sales": ["date:dat", "product_id:int*", "customer_id:int", "quantity:int", "revenue:dec"],
@@ -357,28 +330,51 @@ if __name__ == "__main__":
         }
     }
 
-    # Analyze the query
-    query_analysis = query_analyzer.analyze_query(
-        test_query,
-        context_manager.get_state().current_intents,
-        compressed_schema
+    # Example usage of ExecutionEngine
+    print("ExecutionEngine Example:")
+
+    # Example task step
+    task_step = TaskStep(
+        step_number=1,
+        description="Retrieve top 5 selling products in Q2",
+        required_capability="SQL Query",
+        tools=["SQL Query Tool"],
+        data_sources=[DataSource(
+            name="mysql",
+            tables_or_indices=["sales", "products"],
+            fields={
+                "sales": ["date", "product_id", "revenue"],
+                "products": ["name"]
+            }
+        )],
+        query_info=QueryInfo(
+            query_type="SELECT",
+            data_source="mysql",
+            tables_or_indices=["sales", "products"],
+            fields=["sales.date", "sales.product_id", "sales.revenue", "products.name"],
+            columns=["products.name", "SUM(sales.revenue) as total_revenue"],
+            conditions="sales.date BETWEEN '2023-04-01' AND '2023-06-30'",
+            group_by=["products.name"],
+            order_by=["total_revenue DESC"],
+            limit=5
+        )
     )
 
-    if query_analysis:
-        # Create a task plan
-        task_planner = TaskPlanner(llm, context_manager)
-        task_plan = task_planner.plan_task(query_analysis, compressed_schema)
+    # Select tool for the step
+    tool_and_input = selector.select_tool_for_step(task_step)
+    if tool_and_input:
+        tool, tool_input = tool_and_input
 
-        if task_plan:
-            print("Task Plan:")
-            results = engine.execute_plan(task_plan.steps, selector, compressed_schema)
-            for result in results:
-                if result.result.error:
-                    print(f"Step {result.step_number} failed: {result.result.error}")
-                else:
-                    print(f"Step {result.step_number} succeeded: {result.result.output}")
+        # Execute the step
+        result = engine.execute_step(task_step, tool, tool_input, compressed_schema)
 
+        print(f"Step {result.step_number} result:")
+        if result.result.error:
+            print(f"Error: {result.result.error}")
         else:
-            print("Task planning failed.")
+            print(f"Output: {result.result.output}")
     else:
-        print("Query analysis failed.")
+        print("No suitable tool found for the step.")
+
+    print(
+        "\nNote: This is a simplified example. In practice, execution is managed by PlanAndExecute in plan_execute.py")

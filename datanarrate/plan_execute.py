@@ -172,32 +172,39 @@ class PlanAndExecute:
 
     def execute_plan(self, plan: TaskPlan) -> Dict[str, Any]:
         """
-        Execute the entire plan and generate output.
+        Execute the entire plan, perform reasoning after each step, and generate output.
         """
         compressed_schema = self.retrieve_and_cache_compressed_schema()
-        results = self.execution_engine.execute_plan(plan.steps, self.tool_selector, compressed_schema)
-
-        formatted_results = {}
-        for step_result in results:
-            step_output = step_result.result.output
-            formatted_results[f"step_{step_result.step_number}"] = step_output
+        results = []
+        for step in plan.steps:
+            step_result = self.execute_step(step)
+            results.append(step_result)
 
             reasoning_output = self.reasoning_engine.reason(
                 self.context_manager.state.current_task,
-                json.loads(json.dumps({f"step_{step_result.step_number}": step_output}, cls=CustomJSONEncoder)),
+                json.loads(
+                    json.dumps({f"step_{step_result.step_number}": step_result.result.output}, cls=CustomJSONEncoder)),
                 list(self.tool_selector.tool_registry.keys())
             )
 
-            if reasoning_output.confidence < 0.7:
-                self.logger.warning(f"Low confidence in step {step_result.step_number}. Replanning...")
-                feedback = f"Low confidence in step {step_result.step_number}. Please revise the plan."
+            if reasoning_output.confidence < 0.7 or reasoning_output.result_quality < 0.6:
+                self.logger.warning(f"Issues detected in step {step_result.step_number}. Replanning...")
+                feedback = (
+                    f"Step {step_result.step_number} did not produce satisfactory results. "
+                    f"Confidence: {reasoning_output.confidence}, Result Quality: {reasoning_output.result_quality}. "
+                    f"Reasoning evaluation: {reasoning_output.evaluation}\n"
+                    f"Reasoning explanation: {reasoning_output.explanation}\n"
+                    f"Please revise the plan considering this reasoning."
+                )
                 plan = self.replan_step(plan, feedback)
                 self.logger.info(f"Revised plan reasoning: {plan.reasoning}")
                 # Re-execute the plan from this step
-                remaining_steps = [step for step in plan.steps if step.step_number >= step_result.step_number]
-                new_results = self.execution_engine.execute_plan(remaining_steps, self.tool_selector, compressed_schema)
-                for new_result in new_results:
-                    formatted_results[f"step_{new_result.step_number}"] = new_result.result.output
+                remaining_steps = [s for s in plan.steps if s.step_number >= step_result.step_number]
+                for remaining_step in remaining_steps:
+                    new_result = self.execute_step(remaining_step)
+                    results.append(new_result)
+
+        formatted_results = {f"step_{result.step_number}": result.result.output for result in results}
 
         final_output = self.output_generator.generate_output(
             self.context_manager.state.current_task,
@@ -210,7 +217,6 @@ class PlanAndExecute:
         audience = self.context_manager.state.user_preferences.get("audience", "general")
         storyline = self.storyline_creator.create_storyline(formatted_results, context, audience)
 
-        # Create a dictionary to hold the final output and storyline
         complete_output = {
             "output": final_output,
             "storyline": None
@@ -222,12 +228,10 @@ class PlanAndExecute:
         else:
             self.logger.warning("Failed to generate a valid storyline")
 
-        # Further processing or analysis of the storyline can be added here
         if complete_output["storyline"]:
             self.logger.info(f"Storyline title: {complete_output['storyline']['title']}")
             self.logger.info(f"Number of key insights: {len(complete_output['storyline']['key_insights'])}")
 
-            # Example of further processing: Extracting high-relevance insights
             high_relevance_insights = [
                 insight for insight in complete_output['storyline']['key_insights']
                 if insight['relevance'] > 0.8

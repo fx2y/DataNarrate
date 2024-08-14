@@ -16,6 +16,7 @@ class ReasoningOutput(BaseModel):
     decision: str = Field(description="Decision on the next action to take")
     explanation: str = Field(description="Explanation of the reasoning process")
     confidence: float = Field(description="Confidence level in the decision (0-1)")
+    result_quality: float = Field(description="Assessment of the quality/completeness of current results (0-1)")
 
 
 class ReasoningStrategy(BaseModel):
@@ -71,7 +72,9 @@ class ReasoningEngine:
         strategy_obj = self.strategies.get(strategy, self.strategies["default"])
         prompt = ChatPromptTemplate.from_messages([
             ("system", strategy_obj.prompt_template),
-            ("human", "Provide your reasoning and decision based on the given information.")
+            ("human", "Provide your reasoning and decision based on the given information. "
+                      "Also, assess the quality and completeness of the current results on a scale of 0 to 1, "
+                      "where 0 means the results are completely inadequate or missing, and 1 means the results are perfect and complete.")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
@@ -94,7 +97,8 @@ class ReasoningEngine:
                 evaluation="Error occurred during reasoning",
                 decision="Fallback to default action or request human intervention",
                 explanation=f"An error occurred: {str(e)}",
-                confidence=0.0
+                confidence=0.0,
+                result_quality=0.0
             )
 
     def chain_of_thought(self, task: str, intermediate_results: List[Dict[str, Any]],
@@ -150,6 +154,7 @@ if __name__ == "__main__":
     print(f"Decision: {reasoning_output.decision}")
     print(f"Explanation: {reasoning_output.explanation}")
     print(f"Confidence: {reasoning_output.confidence}")
+    print(f"Result Quality: {reasoning_output.result_quality}")
 
     # Example of chain-of-thought reasoning
     intermediate_results = [
@@ -164,6 +169,7 @@ if __name__ == "__main__":
         print(f"Decision: {step.decision}")
         print(f"Explanation: {step.explanation}")
         print(f"Confidence: {step.confidence}")
+        print(f"Result Quality: {step.result_quality}")
 
     # Example of providing feedback
     engine.provide_feedback(reasoning_output, 0.8)
