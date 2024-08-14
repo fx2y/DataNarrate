@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, List
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
@@ -13,7 +13,7 @@ from config import config
 from context_manager import ContextManager
 from datanarrate.intent_classifier import IntentClassifier
 from datanarrate.query_analyzer import QueryAnalyzer
-from task_planner import TaskStep, TaskPlanner
+from task_planner import TaskStep, TaskPlanner, DataSource, QueryInfo
 
 
 class ToolSelection(BaseModel):
@@ -32,12 +32,18 @@ class ToolSelector:
 
     def _create_selection_chain(self):
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "Select the most appropriate tool for the given task. "
-                       "Consider the task description, required capability, and input description. "
-                       "Provide the tool name, a brief reason for your selection, and the appropriate tool input based on the tool's schema. "
-                       "Selection format: {format_instructions}"),
-            ("human",
-             "Task: {task}\nRequired capability: {required_capability}\nInput description: {input_description}\nAvailable tools: {tools}")
+            ("system",
+             "You are a tool selection expert. Your task is to select the most appropriate tool for a given step in a data analysis task. "
+             "Consider the step description, required capability, and available tools. "
+             "Provide the tool name, a brief reason for your selection, and the appropriate tool input based on the tool's schema. "
+             "Output format: {format_instructions}"),
+            ("human", "Step description: {step_description}\n"
+                      "Required capability: {required_capability}\n"
+                      "Data sources: {data_sources}\n"
+                      "Query information: {query_info}\n"
+                      "Previous results: {previous_results}\n"
+                      "Available tools: {tools}\n\n"
+                      "Select the most appropriate tool and provide the necessary input.")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
@@ -61,24 +67,74 @@ class ToolSelector:
             return tool.args
         return {}
 
-    def select_tool_for_step(self, step: TaskStep) -> Optional[Tuple[BaseTool, Dict[str, Any]]]:
+    def select_tool_for_step(self, step: TaskStep, previous_results: List[Dict[str, Any]] = None) -> Optional[
+        Tuple[BaseTool, Dict[str, Any]]]:
+        tools_description = self.get_tool_descriptions()
+        data_sources_info = self._format_data_sources_info(step.data_sources)
+        query_info = self._format_query_info(step.query_info)
+        previous_results_info = self._format_previous_results(previous_results)
+
         try:
-            self.logger.info(f"Selecting tool for step: {step.description}")
-            tool_descriptions = self.get_tool_descriptions()
             selection = self.selection_chain.invoke({
-                "task": step.description,
+                "step_description": step.description,
                 "required_capability": step.required_capability,
-                "input_description": json.dumps(step.input_description),
-                "tools": tool_descriptions
+                "data_sources": data_sources_info,
+                "query_info": query_info,
+                "previous_results": previous_results_info,
+                "tools": tools_description
             })
-            self.logger.info(f"Selected tool: {selection.tool_name}")
-            self.logger.debug(f"Selection reason: {selection.reason}")
-            self.logger.debug(f"Tool input: {selection.tool_input}")
-            tool = self.tool_registry.get(selection.tool_name)
-            return (tool, selection.tool_input) if tool else None
+
+            selected_tool = self.tool_registry.get(selection.tool_name)
+            if selected_tool:
+                self.logger.info(f"Selected tool: {selection.tool_name}. Reason: {selection.reason}")
+                return selected_tool, selection.tool_input
+            else:
+                self.logger.warning(f"Selected tool '{selection.tool_name}' not found in registry.")
+                return None
         except Exception as e:
-            self.logger.error(f"Error selecting tool: {e}", exc_info=True)
+            self.logger.error(f"Error in tool selection: {e}")
             return None
+
+    def _format_data_sources_info(self, data_sources: List[DataSource]) -> str:
+        if not data_sources:
+            return "No specific data sources provided."
+
+        info = []
+        for ds in data_sources:
+            fields_info = ", ".join([f"{table}: {', '.join(fields)}" for table, fields in ds.fields.items()])
+            info.append(f"- {ds.name} (Tables/Indices: {', '.join(ds.tables_or_indices)}; Fields: {fields_info})")
+
+        return "\n".join(info)
+
+    def _format_query_info(self, query_info: Optional[QueryInfo]) -> str:
+        if not query_info:
+            return "No specific query information provided."
+
+        fields_info = (
+            ', '.join(query_info.fields) if isinstance(query_info.fields, list)
+            else ', '.join([f"{table}: {', '.join(fields)}" for table, fields in query_info.fields.items()])
+        )
+
+        return f"""
+- Data Source: {query_info.data_source}
+- Query Type: {query_info.query_type}
+- Tables/Indices: {', '.join(query_info.tables_or_indices)}
+- Fields: {fields_info}
+- Conditions: {query_info.filters if query_info.filters else 'Not specified'}
+- Group By: {', '.join(query_info.aggregations) if query_info.aggregations else 'Not specified'}
+- Order By: {', '.join(query_info.order_by) if query_info.order_by else 'Not specified'}
+- Limit: {query_info.limit if query_info.limit else 'Not specified'}
+"""
+
+    def _format_previous_results(self, previous_results: List[Dict[str, Any]]) -> str:
+        if not previous_results:
+            return "No previous results available."
+
+        formatted_results = []
+        for i, result in enumerate(previous_results, 1):
+            formatted_results.append(f"Step {i} Result: {result}")
+
+        return "\n".join(formatted_results)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,6 @@ class ExecutionEngine:
                 elif tool.name == "Data Analysis Tool":
                     return self._execute_data_analysis_tool(task, **kwargs)
                 else:
-                    # Execute other tools as before
                     result = tool.invoke(kwargs)
                     return ToolResult(output=result)
 
@@ -94,7 +93,9 @@ class ExecutionEngine:
             if not self.query_validator.validate_sql_query(sql_query.query):
                 return ToolResult(error="Invalid SQL query generated")
 
+            self.logger.info(f"Executing MySQL query: {sql_query.query}")  # Add this line
             result = self.mysql_executor.execute_query(sql_query)
+            self.logger.info(f"MySQL query result: {result}")  # Add this line
             return ToolResult(output=result)
         except Exception as e:
             self.logger.error(f"Error executing MySQL query: {e}", exc_info=True)
@@ -226,7 +227,8 @@ class MySQLExecutor:
                 print(f"Executing SQL query: {sql_text}")  # Debug print
                 result = session.execute(sql_text)
                 if query.query.strip().lower().startswith('select'):
-                    rows = [dict(row) for row in result]
+                    columns = result.keys()
+                    rows = [dict(zip(columns, row)) for row in result]
                     print(f"Query returned {len(rows)} rows")  # Debug print
                     return {"result": rows}
                 else:
@@ -235,6 +237,9 @@ class MySQLExecutor:
         except SQLAlchemyError as e:
             print(f"SQLAlchemy error: {str(e)}")  # Debug print
             raise Exception(f"SQLAlchemy query execution failed: {str(e)}")
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")  # Debug print
+            raise Exception(f"Unexpected error during query execution: {str(e)}")
 
 
 class ElasticsearchExecutor:

@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from environs import Env
 from langchain_core.tools import BaseTool
@@ -86,16 +86,16 @@ class PlanAndExecute:
                      user_preferences: Dict[str, Any]) -> VisualizationSpec:
                 return self.visualization_generator.generate_visualization(data, requirements, user_preferences)
 
-        class DataAnalysisTool(BaseTool):
-            name = "Data Analysis Tool"
-            description = "Performs statistical analysis on datasets"
-
-            def _run(self, dataset: str, analysis_type: str) -> str:
-                return f"Performed {analysis_type} analysis on {dataset}"
+        # class DataAnalysisTool(BaseTool):
+        #     name = "Data Analysis Tool"
+        #     description = "Performs statistical analysis on datasets"
+        #
+        #     def _run(self, dataset: str, analysis_type: str) -> str:
+        #         return f"Performed {analysis_type} analysis on {dataset}"
 
         self.tool_selector.register_tool(SQLQueryTool())
         self.tool_selector.register_tool(VisualizationTool())
-        self.tool_selector.register_tool(DataAnalysisTool())
+        # self.tool_selector.register_tool(DataAnalysisTool())
 
     def retrieve_and_cache_compressed_schema(self):
         if not self.compressed_schema:
@@ -136,13 +136,13 @@ class PlanAndExecute:
             self.logger.error(f"Error in plan_step: {e}", exc_info=True)
             raise
 
-    def execute_step(self, step: TaskStep) -> StepResult:
+    def execute_step(self, step: TaskStep, previous_results: List[StepResult]) -> StepResult:
         """
-        Execute a single step of the plan using the specified tool.
+        Execute a single step of the plan using the specified tool, considering previous results for tool selection.
         """
         try:
             self.logger.info(f"Executing step {step.step_number}: {step.description}")
-            tool_and_input = self.tool_selector.select_tool_for_step(step)
+            tool_and_input = self.tool_selector.select_tool_for_step(step, [r.result.output for r in previous_results])
             if not tool_and_input:
                 raise ValueError(f"No suitable tool found for step: {step.description}")
 
@@ -189,7 +189,7 @@ class PlanAndExecute:
                 replan_count = 0  # Reset replan count after user feedback
 
             step = plan.steps[step_number - 1]
-            step_result = self.execute_step(step)
+            step_result = self.execute_step(step, results)  # Pass previous results to execute_step
             results.append(step_result)
 
             reasoning_output = self.reasoning_engine.reason(
@@ -267,7 +267,7 @@ if __name__ == "__main__":
     planner = PlanAndExecute()
 
     # Example usage
-    task = "Generate a heat map showing the Gini ratio across all regencies in Java provinces for the year 2024"
+    task = "Create a line chart showing the economic growth trends for all provinces from 2018 to 2023."
 
     # Generate and execute plan
     try:
@@ -291,7 +291,7 @@ if __name__ == "__main__":
             # ... (print other storyline details as needed)
 
         # Simulate feedback and replanning
-        feedback = "Add a scatter plot showing the relationship between economic growth and inflation rates for all provinces in 2023."
+        feedback = "Add a stacked bar chart comparing the number of micro and small industries across provinces for the year 2022."
         revised_plan = planner.replan_step(initial_plan, feedback)
         print("\nRevised Plan:")
         for step in revised_plan.steps:
