@@ -33,9 +33,11 @@ class TaskStep(BaseModel):
     step_number: int = Field(description="The order of the step in the plan")
     description: str = Field(description="A clear, concise description of the step")
     required_capability: str = Field(description="The high-level capability required for this step")
-    input_description: Dict[str, Any] = Field(description="Description of required inputs for this step", default={})
-    tools: List[str] = Field(description="List of tools that might be useful for this step", default=[])
-    data_sources: List[DataSource] = Field(description="List of relevant data sources for this step", default=[])
+    input_description: Dict[str, Any] = Field(description="Description of required inputs for this step",
+                                              default_factory=dict)
+    tools: List[str] = Field(description="List of tools that might be useful for this step", default_factory=list)
+    data_sources: List[DataSource] = Field(description="List of relevant data sources for this step",
+                                           default_factory=list)
     query_info: Optional[QueryInfo] = Field(description="Detailed information about the required query", default=None)
 
     @validator('query_info', pre=True)
@@ -43,6 +45,23 @@ class TaskStep(BaseModel):
         if v == {}:
             return None
         return v
+
+    @validator('input_description', pre=True)
+    def handle_input_description(cls, v):
+        if v is None or v == "None":
+            return {}
+        if isinstance(v, str):
+            return {"description": v}
+        return v
+
+    @validator('data_sources', pre=True)
+    def handle_data_sources(cls, v):
+        if v is None:
+            return []
+        return v
+
+    class Config:
+        extra = 'allow'
 
 
 class TaskPlan(BaseModel):
@@ -105,6 +124,14 @@ class TaskPlanner:
 
     def _post_process_plan(self, plan: TaskPlan, query_analysis: QueryAnalysis, compressed_schema: Dict[str, Any]):
         for step in plan.steps:
+            if isinstance(step.input_description, str):
+                step.input_description = {"description": step.input_description}
+            elif step.input_description is None:
+                step.input_description = {}
+
+            if step.data_sources is None:
+                step.data_sources = []
+
             if any(tool.lower().startswith(("sql", "elasticsearch")) for tool in step.tools):
                 step.input_description["task"] = step.description
                 step.input_description["query_context"] = query_analysis.task_type
