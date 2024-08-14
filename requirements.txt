@@ -8,3 +8,5 @@ environs
 elasticsearch
 sqlparse
 elasticsearch-dsl
+pandas
+scipy

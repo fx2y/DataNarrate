@@ -1,11 +1,14 @@
 import json
 import logging
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Union
 
+import numpy as np
+import pandas as pd
 from elasticsearch import Elasticsearch
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from scipy import stats
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
@@ -47,6 +50,7 @@ class ExecutionEngine:
         self.mysql_executor = MySQLExecutor()
         self.elasticsearch_executor = ElasticsearchExecutor()
         self.visualization_generator = VisualizationGenerator(self.intent_classifier.llm, logger=self.logger)
+        self.data_analysis_tool = DataAnalysisTool()
 
     def execute_tool(self, tool: BaseTool, compressed_schema: Dict[str, Any], data_sources: List[DataSource],
                      task: str, query_info: Optional[QueryInfo] = None, **kwargs) -> ToolResult:
@@ -65,6 +69,8 @@ class ExecutionEngine:
                 elif tool.name == "Visualization Tool":
                     return self._execute_visualization_tool(tool, compressed_schema, data_sources, task, query_info,
                                                             **kwargs)
+                elif tool.name == "Data Analysis Tool":
+                    return self._execute_data_analysis_tool(task, **kwargs)
                 else:
                     # Execute other tools as before
                     result = tool.invoke(kwargs)
@@ -131,6 +137,15 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Error generating visualization for task {task}: {e}", exc_info=True)
             return ToolResult(error=f"Error generating visualization: {str(e)}")
+
+    def _execute_data_analysis_tool(self, task: str, **kwargs) -> ToolResult:
+        try:
+            self.logger.info(f"Performing data analysis for task: {task}")
+            analysis_result = self.data_analysis_tool.analyze(task, **kwargs)
+            return ToolResult(output=analysis_result)
+        except Exception as e:
+            self.logger.error(f"Error performing data analysis for task {task}: {e}", exc_info=True)
+            return ToolResult(error=f"Error performing data analysis: {str(e)}")
 
     def _generate_and_optimize_sql_query(self, task: str, compressed_schema: Dict[str, Any],
                                          data_sources: List[DataSource], query_info: Optional[QueryInfo]) -> SQLQuery:
@@ -236,6 +251,47 @@ class ElasticsearchExecutor:
             return {"result": result['hits']['hits']}
         except Exception as e:
             raise Exception(f"Elasticsearch query execution failed: {str(e)}")
+
+
+class DataAnalysisTool:
+    def analyze(self, task: str, data: Union[pd.DataFrame, Dict[str, Any]], analysis_type: str) -> Dict[str, Any]:
+        if isinstance(data, dict):
+            data = pd.DataFrame(data)
+
+        if analysis_type == "descriptive":
+            return self._descriptive_analysis(data)
+        elif analysis_type == "correlation":
+            return self._correlation_analysis(data)
+        elif analysis_type == "hypothesis_test":
+            return self._hypothesis_test(data, task)
+        else:
+            raise ValueError(f"Unsupported analysis type: {analysis_type}")
+
+    def _descriptive_analysis(self, data: pd.DataFrame) -> Dict[str, Any]:
+        return {
+            "summary": data.describe().to_dict(),
+            "column_types": data.dtypes.to_dict(),
+            "missing_values": data.isnull().sum().to_dict()
+        }
+
+    def _correlation_analysis(self, data: pd.DataFrame) -> Dict[str, Any]:
+        numeric_data = data.select_dtypes(include=[np.number])
+        correlation_matrix = numeric_data.corr().to_dict()
+        return {"correlation_matrix": correlation_matrix}
+
+    def _hypothesis_test(self, data: pd.DataFrame, task: str) -> Dict[str, Any]:
+        # This is a simplified example. In practice, you'd need to parse the task
+        # to determine which columns to use and what type of test to perform.
+        if "compare" in task.lower() and len(data.columns) >= 2:
+            col1, col2 = data.columns[:2]
+            t_stat, p_value = stats.ttest_ind(data[col1], data[col2])
+            return {
+                "test_type": "Independent t-test",
+                "t_statistic": t_stat,
+                "p_value": p_value
+            }
+        else:
+            raise ValueError("Unsupported hypothesis test task")
 
 
 if __name__ == "__main__":
