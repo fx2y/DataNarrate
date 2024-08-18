@@ -1,15 +1,17 @@
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import FunctionMessage, BaseMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field, validator
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.runnables import RunnableBranch, chain as as_runnable
+from langchain_core.tools import BaseTool
+from langgraph.graph import StateGraph, END, START
 
-from context_manager import ContextManager
 from query_analyzer import QueryAnalysis
-from query_validator import QueryValidator
 
 
 class DataSource(BaseModel):
@@ -33,35 +35,11 @@ class TaskStep(BaseModel):
     step_number: int = Field(description="The order of the step in the plan")
     description: str = Field(description="A clear, concise description of the step")
     required_capability: str = Field(description="The high-level capability required for this step")
-    input_description: Dict[str, Any] = Field(description="Description of required inputs for this step",
-                                              default_factory=dict)
-    tools: List[str] = Field(description="List of tools that might be useful for this step", default_factory=list)
+    selected_tool: str = Field(description="The name of the selected tool for this step")
+    tool_input: Dict[str, Any] = Field(description="Input parameters for the selected tool")
     data_sources: List[DataSource] = Field(description="List of relevant data sources for this step",
                                            default_factory=list)
     query_info: Optional[QueryInfo] = Field(description="Detailed information about the required query", default=None)
-
-    @validator('query_info', pre=True)
-    def handle_empty_query_info(cls, v):
-        if v == {}:
-            return None
-        return v
-
-    @validator('input_description', pre=True)
-    def handle_input_description(cls, v):
-        if v is None or v == "None":
-            return {}
-        if isinstance(v, str):
-            return {"description": v}
-        return v
-
-    @validator('data_sources', pre=True)
-    def handle_data_sources(cls, v):
-        if v is None:
-            return []
-        return v
-
-    class Config:
-        extra = 'allow'
 
 
 class TaskPlan(BaseModel):
@@ -69,16 +47,24 @@ class TaskPlan(BaseModel):
     reasoning: str = Field(description="Explanation of the planning process")
 
 
+class TaskPlannerState(BaseModel):
+    messages: List[BaseMessage] = Field(default_factory=list)
+    query_analysis: Optional[QueryAnalysis] = None
+    task_plan: Optional[TaskPlan] = None
+    current_step: int = 0
+    status: str = "in_progress"
+
+
 class TaskPlanner:
-    def __init__(self, llm: BaseChatModel, context_manager: ContextManager, logger: Optional[logging.Logger] = None):
+    def __init__(self, llm: BaseChatModel, tools: List[BaseTool], logger: Optional[logging.Logger] = None):
         self.llm = llm
-        self.context_manager = context_manager
         self.logger = logger or logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=TaskPlan)
-        self.plan_chain = self._create_plan_chain()
-        self.query_validator = QueryValidator(logger=logger)
+        self.planner = self._create_planner()
+        self.tools = tools
+        self.graph = self._create_graph()
 
-    def _create_plan_chain(self):
+    def _create_planner(self):
         prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a task planner for a data analysis system. "
                        "Given a query analysis and context, create a detailed plan to accomplish the task. "
@@ -86,111 +72,116 @@ class TaskPlanner:
                        "Use the provided relevant tables/indices and suggested fields to create more specific and efficient steps. "
                        "For each step, specify which data sources, tables/indices, and fields are relevant. "
                        "For database-related steps, include detailed query information in the query_info field. "
-                       "The context includes a list of current intents and their confidences, as well as schema information. "
-                       "Ensure each step is clear, actionable, and makes use of the specific data sources identified.\n\n"
-                       "Unified Schema Compression Format Explanation:\n"
-                       "- MySQL tables: 'mysql': {{'table_name': ['column:typ?*', ...]}}\n"
-                       "  where 'typ' is the first 3 characters of the data type,\n"
-                       "  '?' indicates a nullable column, and '*' indicates a primary key.\n"
-                       "- Elasticsearch indices: 'elasticsearch': {{'index_name': {{'field': 'typ', ...}}}}\n"
-                       "  where 'typ' is the first 3 characters of the field type.\n"
-                       "When referring to tables/indices and fields in your plan, use the actual names from this compressed schema.\n"
+                       "For each step, select the most appropriate tool and provide the necessary input based on the tool's schema. "
+                       "Available tools: {tools}\n\n"
                        "Output format: {format_instructions}"),
             ("human", "Query Analysis: {query_analysis}\nContext: {context}")
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
-        return prompt | self.llm | self.output_parser
 
-    def plan_task(self, query_analysis: QueryAnalysis, compressed_schema: Dict[str, Any]) -> Optional[TaskPlan]:
+        def should_replan(state: list):
+            return isinstance(state[-1], SystemMessage)
+
+        def wrap_messages(state: list):
+            return {"messages": state}
+
+        return (
+                RunnableBranch(
+                    (should_replan, wrap_messages | prompt),
+                    wrap_messages | prompt,
+                )
+                | self.llm.bind_tools(self.tools)
+                | self.output_parser
+        )
+
+    def _create_graph(self):
+        graph = StateGraph(TaskPlannerState)
+
+        graph.add_node("plan", self._plan_task)
+        graph.add_node("execute_step", self._execute_step)
+        graph.add_node("evaluate", self._evaluate_step)
+
+        graph.add_edge(START, "plan")
+        graph.add_edge("plan", "execute_step")
+        graph.add_edge("execute_step", "evaluate")
+
+        graph.add_conditional_edges(
+            "evaluate",
+            self._route_next_step,
+            {
+                "execute_step": "execute_step",
+                "plan": "plan",
+                END: END
+            }
+        )
+
+        return graph.compile()
+
+    def _plan_task(self, state: TaskPlannerState) -> Dict[str, Any]:
         try:
             self.logger.info("Planning task based on query analysis")
-            context = self.context_manager.get_context_summary()
-            context["schema_info"] = compressed_schema
-            context["relevant_tables"] = query_analysis.required_data_sources
-            context["suggested_fields"] = {ds.name: ds.suggested_fields for ds in query_analysis.required_data_sources}
+            context = {
+                "schema_info": state.query_analysis.schema_info,
+                "relevant_tables": state.query_analysis.required_data_sources,
+                "suggested_fields": {ds.name: ds.suggested_fields for ds in state.query_analysis.required_data_sources}
+            }
 
-            plan = self.plan_chain.invoke({
-                "query_analysis": query_analysis.dict(),
-                "context": context
+            plan = self.planner.invoke({
+                "query_analysis": state.query_analysis.dict(),
+                "context": context,
+                "tools": [tool.description for tool in self.tools],
+                "messages": state.messages
             })
-
-            # Post-process the plan to ensure task descriptions and query info are included for database steps
-            self._post_process_plan(plan, query_analysis, compressed_schema)
 
             self.logger.info(f"Task plan created: {plan}")
-            return plan
+            return {"task_plan": plan}
         except Exception as e:
             self.logger.error(f"Error planning task: {e}", exc_info=True)
-            return None
+            return {}
 
-    def _post_process_plan(self, plan: TaskPlan, query_analysis: QueryAnalysis, compressed_schema: Dict[str, Any]):
-        for step in plan.steps:
-            if isinstance(step.input_description, str):
-                step.input_description = {"description": step.input_description}
-            elif step.input_description is None:
-                step.input_description = {}
+    def _execute_step(self, state: TaskPlannerState) -> Dict[str, Any]:
+        current_step = state.task_plan.steps[state.current_step]
+        tool = next((t for t in self.tools if t.name == current_step.selected_tool), None)
+        if tool:
+            try:
+                result = tool.invoke(current_step.tool_input)
+                return {
+                    "messages": state.messages + [FunctionMessage(content=str(result), name=tool.name)],
+                    "current_step": state.current_step + 1
+                }
+            except Exception as e:
+                self.logger.error(f"Error executing step: {e}", exc_info=True)
+                return {"status": "error", "error": str(e)}
+        else:
+            self.logger.error(f"Tool not found: {current_step.selected_tool}")
+            return {"status": "error", "error": f"Tool not found: {current_step.selected_tool}"}
 
-            if step.data_sources is None:
-                step.data_sources = []
+    def _evaluate_step(self, state: TaskPlannerState) -> Dict[str, Any]:
+        if state.current_step >= len(state.task_plan.steps):
+            return {"status": "complete"}
+        elif state.status == "error":
+            return {"status": "replan"}
+        else:
+            return {"status": "continue"}
 
-            if any(tool.lower().startswith(("sql", "elasticsearch")) for tool in step.tools):
-                step.input_description["task"] = step.description
-                step.input_description["query_context"] = query_analysis.task_type
-                if query_analysis.time_range:
-                    step.input_description["time_range"] = query_analysis.time_range
+    def _route_next_step(self, state: TaskPlannerState) -> str:
+        if state.status == "complete":
+            return END
+        elif state.status == "replan":
+            return "plan"
+        else:
+            return "execute_step"
 
-    def replan(self, original_plan: TaskPlan, feedback: str, current_step: int) -> TaskPlan:
-        """
-        Revise the plan based on feedback and new context.
-        """
-        try:
-            self.logger.info(f"Replanning based on feedback: {feedback}")
-            prompt = ChatPromptTemplate.from_messages([("system", """"
-            You are an AI task planner. You have been given an original plan and feedback about its execution.
-            Your task is to revise the plan, taking into account the feedback and the current execution state.
-
-            Original Plan:
-            {original_plan}
-
-            Feedback:
-            {feedback}
-
-            Current Step: {current_step}
-
-            Please create a revised plan. You can:
-            1. Modify existing steps
-            2. Add new steps
-            3. Remove steps
-            4. Reorder steps
-
-            Focus on addressing the issues raised in the feedback, but also consider the overall efficiency and effectiveness of the plan.
-            If possible, try to salvage and reuse parts of the original plan that are still valid.
-
-            Provide the revised plan in the same format as the original plan, along with a brief explanation of your changes.
-            """)]).partial(format_instructions=self.output_parser.get_format_instructions())
-
-            replan_chain = prompt | self.llm | self.output_parser
-            new_plan = replan_chain.invoke({
-                "original_plan": json.dumps(original_plan.dict(), indent=2),
-                "feedback": feedback,
-                "current_step": current_step
-            })
-
-            self.logger.info(f"Generated revised plan with {len(new_plan.steps)} steps")
-            self.logger.info(f"Replanning reasoning: {new_plan.reasoning}")
-
-            return new_plan
-        except Exception as e:
-            self.logger.error(f"Error in replan: {e}", exc_info=True)
-            return original_plan  # Return the original plan if replanning fails
+    @as_runnable
+    def run(self, query_analysis: QueryAnalysis) -> Iterable[Dict[str, Any]]:
+        state = TaskPlannerState(query_analysis=query_analysis)
+        while True:
+            state = self.graph.invoke(state)
+            yield state
+            if state.status == "complete":
+                break
 
     def update_context_with_plan(self, plan: TaskPlan):
-        """
-        Update the context manager with the current plan.
-        """
-        self.context_manager.update_state(current_task=plan.steps[0].description if plan.steps else "")
-        self.context_manager.add_to_conversation_history("assistant",
-                                                         f"I've created a plan with {len(plan.steps)} steps.")
-        self.logger.info("Updated context with new plan")
+        self.context_manager.add_to_conversation_history("system", f"Task plan created: {plan.dict()}")
 
 
 if __name__ == "__main__":
@@ -212,15 +203,22 @@ if __name__ == "__main__":
 
     # Initialize IntentClassifier, ContextManager, QueryAnalyzer, and TaskPlanner
     intent_classifier = IntentClassifier(llm)
-    context_manager = ContextManager(intent_classifier, thread_id="example_thread")
-    query_analyzer = QueryAnalyzer(llm, context_manager)
-    task_planner = TaskPlanner(llm, context_manager)
+    query_analyzer = QueryAnalyzer(llm)
+
+
+    # Register tools (example)
+    class SQLQueryTool(BaseTool):
+        name = "SQL Query Tool"
+        description = "Executes SQL queries on a MySQL database"
+
+        def _run(self, query: str) -> str:
+            return f"Executed SQL query: {query}"
+
+
+    task_planner = TaskPlanner(llm)
 
     # Test the TaskPlanner
     test_query = "Show me a bar chart of our top 5 selling products in Q2, including their revenue and compare it with last year's Q2 performance"
-
-    # Update context with the test query
-    context_manager.update_context(test_query)
 
     compressed_schema = {
         "mysql": {
@@ -256,21 +254,19 @@ if __name__ == "__main__":
         }
     }
 
-    context_manager.update_schema_info(compressed_schema)
-
     # Analyze the query
-    query_analysis = query_analyzer.analyze_query(test_query, context_manager.get_state().current_intents,
-                                                  context_manager.get_state().relevant_data.get("schema_info", {}))
+    intents = intent_classifier.classify(test_query)
+    query_analysis = query_analyzer.analyze_query(test_query, intents.intents, compressed_schema)
 
     if query_analysis:
-        task_plan = task_planner.plan_task(query_analysis,
-                                           context_manager.get_state().relevant_data.get("schema_info", {}))
+        task_plan = task_planner.run(query_analysis)
         if task_plan:
-            print("Initial Task Plan:")
+            print("Task Plan:")
             for step in task_plan.steps:
                 print(f"Step {step.step_number}: {step.description}")
                 print(f"  Required Capability: {step.required_capability}")
-                print(f"  Tools: {', '.join(step.tools)}")
+                print(f"  Selected Tool: {step.selected_tool}")
+                print(f"  Tool Input: {json.dumps(step.tool_input, indent=2)}")
                 print(f"  Data Sources:")
                 for data_source in step.data_sources:
                     print(f"    - {data_source.name}:")
@@ -299,15 +295,15 @@ if __name__ == "__main__":
 
             # Test replanning
             feedback = "The plan looks good, but we need to add a step to check for any data anomalies before visualization."
-            context_manager.add_to_conversation_history("user", feedback)
 
-            updated_plan = task_planner.replan(task_plan, feedback, current_step=1)
+            updated_plan = task_planner.run(query_analysis)
             if updated_plan:
                 print("\nUpdated Task Plan:")
                 for step in updated_plan.steps:
                     print(f"Step {step.step_number}: {step.description}")
                     print(f"  Required Capability: {step.required_capability}")
-                    print(f"  Tools: {', '.join(step.tools)}")
+                    print(f"  Selected Tool: {step.selected_tool}")
+                    print(f"  Tool Input: {json.dumps(step.tool_input, indent=2)}")
                     print(f"  Data Sources:")
                     for data_source in step.data_sources:
                         print(f"    - {data_source.name}:")
@@ -315,6 +311,20 @@ if __name__ == "__main__":
                         print(f"        Fields:")
                         for table_or_index, fields in data_source.fields.items():
                             print(f"          - {table_or_index}: {', '.join(fields)}")
+                    if step.query_info:
+                        print(f"  Query Info:")
+                        print(f"    - Data Source: {step.query_info.data_source}")
+                        print(f"    - Query Type: {step.query_info.query_type}")
+                        print(f"    - Tables/Indices: {', '.join(step.query_info.tables_or_indices)}")
+                        print(f"    - Fields: {', '.join(step.query_info.fields)}")
+                        if step.query_info.filters:
+                            print(f"    - Filters: {step.query_info.filters}")
+                        if step.query_info.aggregations:
+                            print(f"    - Aggregations: {', '.join(step.query_info.aggregations)}")
+                        if step.query_info.order_by:
+                            print(f"    - Order By: {', '.join(step.query_info.order_by)}")
+                        if step.query_info.limit:
+                            print(f"    - Limit: {step.query_info.limit}")
                 print(f"\nReasoning: {updated_plan.reasoning}")
 
                 # Update context with the updated plan
@@ -322,7 +332,6 @@ if __name__ == "__main__":
 
             # Print final context summary
             print("\nFinal Context Summary:")
-            print(json.dumps(context_manager.get_context_summary(), indent=2, default=str))
         else:
             print("Task planning failed.")
     else:

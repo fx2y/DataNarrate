@@ -9,6 +9,7 @@ from langchain_core.pydantic_v1 import BaseModel, Field
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict
 
 from config import config
 
@@ -34,12 +35,12 @@ class QueryAnalysis(BaseModel):
         description="Potential insights that could be derived from the query")
 
 
-class State(BaseModel):
+class State(TypedDict):
     messages: Annotated[List, add_messages]
     query: str
     intents: List[str]
     compressed_schema: Dict[str, Any]
-    analysis: Optional[QueryAnalysis] = None
+    analysis: Optional[QueryAnalysis]
 
 
 class QueryAnalyzer:
@@ -109,7 +110,7 @@ class QueryAnalyzer:
 
         workflow.add_conditional_edges(
             "analyze",
-            lambda x: "human_review" if x.analysis else END,
+            lambda x: "human_review" if x.get("analysis") else END,
             {
                 "human_review": "human_review",
                 END: END
@@ -118,7 +119,7 @@ class QueryAnalyzer:
 
         workflow.add_conditional_edges(
             "human_review",
-            lambda x: "analyze" if "rejected" in x.messages[-1].content.lower() else END,
+            lambda x: "analyze" if "rejected" in x.get("messages")[-1].content.lower() else END,
             {
                 "analyze": "analyze",
                 END: END
@@ -137,13 +138,15 @@ class QueryAnalyzer:
         )
         config = {"configurable": {"thread_id": uuid.uuid4()}}
         final_state = None
+        results = []
         for event in self.graph.stream(initial_state, config):
             for key, value in event.items():
                 if key == "messages":
                     for msg in value:
                         print(f"{msg[0]}: {msg[1]}")
-            final_state = event.get('state')  # Get the latest state from each event
+                results.append(value)
 
+        final_state = results[-1]
         return final_state.analysis if final_state else None
 
 
