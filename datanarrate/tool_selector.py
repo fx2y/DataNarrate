@@ -34,7 +34,7 @@ class ToolSelector:
         prompt = ChatPromptTemplate.from_messages([
             ("system",
              "You are a tool selection expert. Your task is to select the most appropriate tool for a given step in a data analysis task. "
-             "Consider the step description, required capability, and available tools. "
+             "Consider the step description, required capability, available tools, and previous results. "
              "Provide the tool name, a brief reason for your selection, and the appropriate tool input based on the tool's schema. "
              "Output format: {format_instructions}"),
             ("human", "Step description: {step_description}\n"

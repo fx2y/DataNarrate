@@ -1,10 +1,14 @@
 import logging
-from typing import Dict, Any, List, Optional
+import uuid
+from typing import Dict, Any, List, Optional, Annotated
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 
 from config import config
 
@@ -30,13 +34,20 @@ class QueryAnalysis(BaseModel):
         description="Potential insights that could be derived from the query")
 
 
+class State(BaseModel):
+    messages: Annotated[List, add_messages]
+    query: str
+    intents: List[str]
+    compressed_schema: Dict[str, Any]
+    analysis: Optional[QueryAnalysis] = None
+
+
 class QueryAnalyzer:
-    def __init__(self, llm: BaseChatModel, context_manager):
+    def __init__(self, llm: BaseChatModel):
         self.llm = llm
-        self.context_manager = context_manager
         self.logger = logging.getLogger(__name__)
         self.output_parser = PydanticOutputParser(pydantic_object=QueryAnalysis)
-        self.analyze_chain = self._create_analyze_chain()
+        self.graph = self._create_graph()
 
     def _create_analyze_chain(self):
         prompt = ChatPromptTemplate.from_messages([
@@ -63,24 +74,77 @@ class QueryAnalyzer:
         ]).partial(format_instructions=self.output_parser.get_format_instructions())
         return prompt | self.llm | self.output_parser
 
-    def analyze_query(self, query: str, intents: List[str], compressed_schema: Dict[str, Any]) -> Optional[
-        QueryAnalysis]:
+    def _analyze_query(self, state: State) -> Dict[str, Any]:
         try:
-            self.logger.info(f"Analyzing query: {query}")
-            analysis = self.analyze_chain.invoke({
-                "query": query,
-                "intents": ", ".join(intents),
-                "schema_info": compressed_schema
+            self.logger.info(f"Analyzing query: {state.query}")
+            analysis = self._create_analyze_chain().invoke({
+                "query": state.query,
+                "intents": ", ".join(state.intents),
+                "schema_info": state.compressed_schema
             })
             self.logger.info(f"Query analysis completed: {analysis}")
-
-            # Store the analysis in the ContextManager
-            self.context_manager.update_state(query_analysis=analysis)
-
-            return analysis
+            return {"analysis": analysis, "messages": [("system", "Query analysis completed.")]}
         except Exception as e:
             self.logger.error(f"Error analyzing query: {e}", exc_info=True)
-            return None
+            return {"messages": [("system", f"Error analyzing query: {str(e)}")]}
+
+    def _human_review(self, state: State) -> Dict[str, Any]:
+        # This is a placeholder for human review functionality
+        # In a real implementation, this would interact with a user interface
+        print("Human review of query analysis:")
+        print(state.analysis)
+        user_input = input("Approve analysis? (yes/no): ")
+        if user_input.lower() == 'yes':
+            return {"messages": [("human", "Analysis approved.")]}
+        else:
+            return {"messages": [("human", "Analysis rejected. Please refine.")]}
+
+    def _create_graph(self):
+        workflow = StateGraph(State)
+
+        workflow.add_node("analyze", self._analyze_query)
+        workflow.add_node("human_review", self._human_review)
+
+        workflow.set_entry_point("analyze")
+
+        workflow.add_conditional_edges(
+            "analyze",
+            lambda x: "human_review" if x.analysis else END,
+            {
+                "human_review": "human_review",
+                END: END
+            }
+        )
+
+        workflow.add_conditional_edges(
+            "human_review",
+            lambda x: "analyze" if "rejected" in x.messages[-1].content.lower() else END,
+            {
+                "analyze": "analyze",
+                END: END
+            }
+        )
+
+        return workflow.compile(checkpointer=MemorySaver())
+
+    def analyze_query(self, query: str, intents: List[str], compressed_schema: Dict[str, Any]) -> Optional[
+        QueryAnalysis]:
+        initial_state = State(
+            messages=[],
+            query=query,
+            intents=intents,
+            compressed_schema=compressed_schema
+        )
+        config = {"configurable": {"thread_id": uuid.uuid4()}}
+        final_state = None
+        for event in self.graph.stream(initial_state, config):
+            for key, value in event.items():
+                if key == "messages":
+                    for msg in value:
+                        print(f"{msg[0]}: {msg[1]}")
+            final_state = event.get('state')  # Get the latest state from each event
+
+        return final_state.analysis if final_state else None
 
 
 if __name__ == "__main__":
@@ -141,7 +205,7 @@ if __name__ == "__main__":
 
 
     # Initialize QueryAnalyzer with mock ContextManager
-    analyzer = QueryAnalyzer(llm, MockContextManager())
+    analyzer = QueryAnalyzer(llm)
 
     # Test the QueryAnalyzer with a query involving nested objects
     test_query = "Show me the top 5 customers who have spent the most on electronics products in Q2, including their order details and product specifications"
