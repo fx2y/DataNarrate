@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Annotated
 import pandas as pd
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.pydantic_v1 import BaseModel, Field, validator
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool
 from langgraph.prebuilt import InjectedState
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -24,7 +24,7 @@ class MySQLConfig(BaseModel):
         return v
 
 
-class MySQLTool(StructuredTool):
+class MySQLTool(BaseTool):
     name: str = "mysql_tool"
     description: str = "Execute SQL queries on a MySQL database, list tables, or describe table schemas"
     config: MySQLConfig = Field(..., description="MySQL connection configuration")

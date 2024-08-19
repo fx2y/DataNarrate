@@ -1,12 +1,14 @@
-from typing import Dict, Any, List, Literal
+from typing import Dict, Any, List, Literal, Optional
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, MessagesState
 from langgraph.prebuilt import ToolNode
+
+from datanarrate.config import config
 
 
 class ReasoningOutput(BaseModel):
@@ -19,7 +21,12 @@ class ReasoningOutput(BaseModel):
 
 class ReasoningConfig(BaseModel):
     """Configuration for the reasoning node"""
-    llm: BaseChatModel = Field(default_factory=lambda: ChatAnthropic(model="claude-3-haiku-20240307"))
+    llm: BaseChatModel = Field(default_factory=lambda: ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY,
+        temperature=0.2
+    ))
     prompt: ChatPromptTemplate = Field(
         default_factory=lambda: ChatPromptTemplate.from_messages([
             ("system",
@@ -32,8 +39,8 @@ class ReasoningConfig(BaseModel):
 
 class ReasoningState(MessagesState):
     """State for the reasoning node"""
-    context: Dict[str, Any] = Field(default_factory=dict)
-    reasoning_output: ReasoningOutput = Field(default=None)
+    context: Dict[str, Any]
+    reasoning_output: Optional[ReasoningOutput]
 
 
 class ReasoningNode:
@@ -107,24 +114,3 @@ async def add_reasoning_to_graph(graph: StateGraph, config: ReasoningConfig = Re
             "execute_tools": "execute_tools"
         }
     )
-
-
-# For testing and demonstration purposes
-async def test_reasoning_node():
-    config = ReasoningConfig()
-    node = ReasoningNode(config)
-    test_state = ReasoningState(
-        context={"task": "Analyze data"},
-        messages=[HumanMessage(content="Please analyze the sales data")]
-    )
-    result = await node(test_state)
-    assert "messages" in result
-    assert "reasoning_output" in result
-    print("Test passed successfully")
-    print(f"Reasoning output: {result['reasoning_output']}")
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(test_reasoning_node())

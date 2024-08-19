@@ -2,9 +2,12 @@ from operator import add
 from typing import Annotated, Dict, List
 
 from langchain_core.messages import BaseMessage, FunctionMessage
+from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
+from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel, Field
+
+from datanarrate.config import config
 
 
 class ExecuteStepState(BaseModel):
@@ -56,7 +59,6 @@ if __name__ == "__main__":
     from langgraph.graph import StateGraph, END
     from langchain_core.tools import tool
     from langchain_core.messages import HumanMessage
-    from langchain_anthropic import ChatAnthropic
 
 
     @tool
@@ -73,7 +75,12 @@ if __name__ == "__main__":
 
     app = workflow.compile()
 
-    llm = ChatAnthropic(model="claude-3-haiku-20240307")
+    llm = ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY,
+        temperature=0.2
+    )
     llm_with_tools = llm.bind_tools([search])
 
     initial_state = ExecuteStepState(

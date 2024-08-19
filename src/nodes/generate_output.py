@@ -83,8 +83,9 @@ tools = []  # Add any tools that might be needed
 tool_node = ToolNode(tools)
 workflow.add_node("tools", tool_node)
 
+
 # Compile the graph
-app = workflow.compile()
+# app = workflow.compile()
 
 
 # Example usage

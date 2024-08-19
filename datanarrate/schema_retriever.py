@@ -7,7 +7,7 @@ from elasticsearch import Elasticsearch
 from langchain_core.pydantic_v1 import BaseModel, Field
 from sqlalchemy import create_engine, inspect
 
-from config import config
+from datanarrate.config import config
 
 # Disable warnings about insecure connections
 urllib3.disable_warnings()

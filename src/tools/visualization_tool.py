@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -52,7 +52,7 @@ class VisualizationTool(BaseTool):
 
     def _run(self, chart_type: str, data: Dict[str, List[Any]], title: Optional[str] = None,
              x_axis_label: Optional[str] = None, y_axis_label: Optional[str] = None,
-             state: Optional[InjectedState[VisualizationState]] = None) -> str:
+             state: Optional[InjectedState("VisualizationState")] = None) -> str:
         try:
             if chart_type not in ["bar", "line", "scatter"]:
                 raise ValueError(f"Unsupported chart type: {chart_type}")
@@ -73,7 +73,7 @@ class VisualizationTool(BaseTool):
 
     async def _arun(self, chart_type: str, data: Dict[str, List[Any]], title: Optional[str] = None,
                     x_axis_label: Optional[str] = None, y_axis_label: Optional[str] = None,
-                    state: Optional[InjectedState[VisualizationState]] = None) -> str:
+                    state: Optional[InjectedState(VisualizationState)] = None) -> str:
         # Simulate an asynchronous operation
         await asyncio.sleep(1)
         return self._run(chart_type, data, title, x_axis_label, y_axis_label, state)

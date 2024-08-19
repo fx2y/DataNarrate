@@ -1,55 +1,75 @@
 import logging
-from functools import lru_cache
 from typing import Dict, Any, List
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.output_parsers import StructuredOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langgraph.graph import StateGraph, Node
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from langgraph.constants import END
+from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, Field
+
+from datanarrate.config import config
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+class DataSourceInfo(BaseModel):
+    name: str = Field(description="Name of the data source (e.g., 'mysql' or 'elasticsearch')")
+    relevant_tables_or_indices: List[str] = Field(description="List of relevant tables or indices for this data source")
+    suggested_fields: Dict[str, List[str]] = Field(description="Suggested fields for each table or index")
+
+
 class QueryAnalysis(BaseModel):
     """Structured output for query analysis"""
     task_type: str = Field(description="The type of task required (e.g., data analysis, visualization, explanation)")
     sub_tasks: List[str] = Field(description="List of sub-tasks needed to complete the main task")
-    required_data_sources: List[str] = Field(description="List of data sources needed to answer the query")
+    required_data_sources: List[DataSourceInfo] = Field(
+        description="List of required data sources with their relevant tables/indices and fields")
     constraints: List[str] = Field(description="Any constraints or specific requirements mentioned in the query")
     potential_insights: List[str] = Field(description="Potential insights or angles to explore based on the query")
 
 
-class AnalyzeQueryNode(Node):
+class AnalyzeQueryNode:
     def __init__(self):
-        self.output_parser = StructuredOutputParser.from_pydantic_model(QueryAnalysis)
         self.prompt = ChatPromptTemplate.from_template(
             """You are an expert data analyst assistant. Analyze the following user query and provide a structured output:
 
             User Query: {query}
 
-            {format_instructions}
+            Unified Compressed Schema:
+            {schema}
 
             Provide a detailed analysis of the query, breaking it down into its components and identifying key aspects for processing.
+            Use the provided schema to identify relevant data sources, tables/indices, and fields.
+
+            Output the result as a JSON object with the following structure:
+            {{
+                "task_type": "string",
+                "sub_tasks": ["string"],
+                "required_data_sources": [
+                    {{
+                        "name": "string",
+                        "relevant_tables_or_indices": ["string"],
+                        "suggested_fields": {{"table_name": ["field1", "field2"]}}
+                    }}
+                ],
+                "constraints": ["string"],
+                "potential_insights": ["string"]
+            }}
             """
         )
-        self.model = ChatAnthropic(model="claude-3-haiku-20240307")
+        self.model = ChatOpenAI(
+            model_name=config.LLM_MODEL_NAME,
+            openai_api_base=config.OPENAI_API_BASE,
+            openai_api_key=config.OPENAI_API_KEY,
+            temperature=0.2
+        )
+        self.chain = self.prompt | self.model.with_structured_output(QueryAnalysis)
 
-    @lru_cache(maxsize=100)
-    def _analyze_query(self, query: str) -> QueryAnalysis:
-        """Analyze a query and cache the result"""
-        input_dict = {
-            "query": query,
-            "format_instructions": self.output_parser.get_format_instructions()
-        }
-        response = self.model.invoke(self.prompt.format_prompt(**input_dict))
-        return self.output_parser.parse(response.content)
-
-    async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def run(self, state: Dict[str, Any], config) -> Dict[str, Any]:
         """Analyzes the user's query and updates the state with structured analysis."""
         try:
             # Extract the latest user message
@@ -60,30 +80,33 @@ class AnalyzeQueryNode(Node):
                 return state  # No user message found, return unchanged state
 
             # Generate the analysis
-            analysis = self._analyze_query(user_message.content)
+            analysis = self.chain.invoke({
+                "query": user_message.content,
+                "schema": config["configurable"].get("schema_info", {})
+            })
 
             # Create AI message with the analysis
             ai_message = AIMessage(content=str(analysis))
 
             # Return new state with the analysis and updated messages
             return {
-                **state,
                 "query_analysis": analysis.dict(),
                 "messages": state["messages"] + [ai_message]
             }
         except Exception as e:
             logger.error(f"Error in analyze_query: {str(e)}")
             return {
-                **state,
                 "error": f"Failed to analyze query: {str(e)}"
             }
 
 
 # Create the graph
 def create_analyze_query_graph() -> CompiledStateGraph:
-    workflow = StateGraph()
-    workflow.add_node("analyze_query", AnalyzeQueryNode())
+    analyze_query_node = AnalyzeQueryNode()
+    workflow = StateGraph(Dict[str, Any])
+    workflow.add_node("analyze_query", analyze_query_node.run)
     workflow.set_entry_point("analyze_query")
+    workflow.add_edge("analyze_query", END)
     return workflow.compile()
 
 
@@ -91,6 +114,19 @@ def create_analyze_query_graph() -> CompiledStateGraph:
 analyze_query_graph = create_analyze_query_graph()
 
 
-async def analyze_query(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Wrapper function to run the analyze_query graph"""
-    return await analyze_query_graph.arun(state)
+async def analyze_query(state: Dict[str, Any], config) -> Dict[str, Any]:
+    """Analyzes the user's query and updates the state with structured analysis."""
+    try:
+        node = AnalyzeQueryNode()
+        result = await node.run(state, config)
+        return {
+            **state,
+            "query_analysis": result["query_analysis"],
+            "messages": result["messages"]
+        }
+    except Exception as e:
+        logger.error(f"Error in analyze_query: {str(e)}")
+        return {
+            **state,
+            "error": f"Failed to analyze query: {str(e)}"
+        }
