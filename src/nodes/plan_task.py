@@ -3,10 +3,11 @@ from typing import List, Dict, Any, Annotated
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
+from langgraph.graph.state import CompiledStateGraph
 
 
 # Define models
@@ -118,7 +119,7 @@ def should_continue(state: PlanningState) -> str:
 
 
 # Graph construction
-def create_planning_graph(llm: BaseChatModel, tools: List[BaseTool]) -> StateGraph:
+def create_planning_graph(llm: BaseChatModel, tools: List[BaseTool]) -> CompiledStateGraph:
     workflow = StateGraph(PlanningState)
 
     workflow.add_node("plan_and_select", lambda state: plan_task_and_select_tools(state, llm, tools))

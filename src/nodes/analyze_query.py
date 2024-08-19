@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StructuredOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, Node
+from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 # Set up logging
@@ -79,7 +80,7 @@ class AnalyzeQueryNode(Node):
 
 
 # Create the graph
-def create_analyze_query_graph() -> StateGraph:
+def create_analyze_query_graph() -> CompiledStateGraph:
     workflow = StateGraph()
     workflow.add_node("analyze_query", AnalyzeQueryNode())
     workflow.set_entry_point("analyze_query")
