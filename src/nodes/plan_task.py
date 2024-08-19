@@ -1,12 +1,11 @@
-# nodes/plan_task.py
+from typing import List, Dict, Any, Annotated
 
-from typing import List, Dict, Any, Optional
-
-from langchain_core.callbacks import CallbackManagerForChainRun
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 
@@ -24,6 +23,14 @@ class PlanStep(BaseModel):
 class Plan(BaseModel):
     steps: List[PlanStep]
     final_answer: str
+
+
+# Define state
+class PlanningState(BaseModel):
+    messages: Annotated[List[BaseMessage], add_messages]
+    plan: Plan = None
+    current_step: int = 0
+    status: str = "planning"
 
 
 # Prompts
@@ -73,40 +80,46 @@ def parse_llm_output(output: str) -> Plan:
 
 
 def plan_task_and_select_tools(
-        state: Dict[str, Any],
+        state: PlanningState,
         llm: BaseChatModel,
         tools: List[BaseTool],
-        callbacks: Optional[CallbackManagerForChainRun] = None
-) -> Dict[str, Any]:
+) -> PlanningState:
     """
     Generate a plan and select tools based on the input in the state.
     """
     try:
         tool_descriptions = get_tool_descriptions(tools)
-        prompt_args = {"input": state.get("input", ""), "tool_descriptions": tool_descriptions}
-        llm_output = llm.predict_messages([planner_prompt.format_messages(**prompt_args)[0]], callbacks=callbacks)
+        input_message = state.messages[-1].content if state.messages else ""
+        prompt_args = {"input": input_message, "tool_descriptions": tool_descriptions}
+        llm_output = llm.predict_messages([planner_prompt.format_messages(**prompt_args)[0]])
 
         plan = parse_llm_output(llm_output.content)
 
-        return {
-            **state,
-            "plan": plan.dict(),
-            "current_step": 0,
-            "status": "planning_complete"
-        }
+        return PlanningState(
+            messages=state.messages + [AIMessage(content=llm_output.content)],
+            plan=plan,
+            current_step=0,
+            status="planning_complete"
+        )
     except Exception as e:
-        if callbacks:
-            callbacks.on_chain_error(e, verbose=True)
-        return {
-            **state,
-            "error": f"Planning and tool selection failed: {str(e)}",
-            "status": "planning_failed"
-        }
+        return PlanningState(
+            messages=state.messages + [AIMessage(content=f"Planning and tool selection failed: {str(e)}")],
+            status="planning_failed"
+        )
+
+
+def should_continue(state: PlanningState) -> str:
+    if state.status == "planning_complete":
+        return END
+    elif state.status == "planning_failed":
+        return "plan_and_select"
+    else:
+        return "plan_and_select"
 
 
 # Graph construction
 def create_planning_graph(llm: BaseChatModel, tools: List[BaseTool]) -> StateGraph:
-    workflow = StateGraph()
+    workflow = StateGraph(PlanningState)
 
     workflow.add_node("plan_and_select", lambda state: plan_task_and_select_tools(state, llm, tools))
 
@@ -114,7 +127,7 @@ def create_planning_graph(llm: BaseChatModel, tools: List[BaseTool]) -> StateGra
 
     workflow.add_conditional_edges(
         "plan_and_select",
-        lambda x: END if x["status"] == "planning_complete" else "plan_and_select"
+        should_continue
     )
 
     return workflow.compile()
@@ -122,8 +135,10 @@ def create_planning_graph(llm: BaseChatModel, tools: List[BaseTool]) -> StateGra
 # Example usage:
 # from langchain_openai import ChatOpenAI
 # from langchain_community.tools import DuckDuckGoSearchRun
+# from langchain_core.messages import HumanMessage
 #
 # llm = ChatOpenAI(model="gpt-4-turbo-preview", temperature=0)
 # tools = [DuckDuckGoSearchRun()]
 # planning_graph = create_planning_graph(llm, tools)
-# result = planning_graph.invoke({"input": "What's the weather like in San Francisco?"})
+# initial_state = PlanningState(messages=[HumanMessage(content="What's the weather like in San Francisco?")])
+# result = planning_graph.invoke(initial_state)
