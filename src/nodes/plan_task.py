@@ -1,4 +1,6 @@
-from typing import List, Dict, Any, Annotated, Union
+import json
+import re
+from typing import List, Dict, Any, Annotated
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage
@@ -9,15 +11,14 @@ from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 
 
-# Define models
 class ToolSelection(BaseModel):
     tool: str
-    args: Dict[str, Union[str, int, float, bool, Dict, List]] = Field(default_factory=dict)
+    args: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PlanStep(BaseModel):
     description: str
-    tools: List[ToolSelection] = Field(default_factory=list)
+    tool: ToolSelection
 
 
 class Plan(BaseModel):
@@ -44,18 +45,22 @@ Query Analysis:
 
 Guidelines:
 1. Each step should be concise and actionable.
-2. Select one or more tools for each step if needed. If no tool is required, leave it empty.
+2. Select one tool for each step. If no tool is required, use the 'LLM' tool for reasoning.
 3. For tool arguments, you can use:
    - Placeholders like $0, $1, $2, etc., to refer to outputs from specific previous steps.
    - Direct values for primitives, dicts, or lists.
-4. When using database tools, refer to the required_data_sources from the query analysis to construct more accurate queries.
-5. The final step should provide the answer to the objective.
+4. When using the data_extractor tool, refer to the required_data_sources from the query analysis to construct accurate queries.
+5. Use the data_transformer tool to process and prepare data for visualization or analysis.
+6. Use the visualizer tool to create charts and graphs based on the processed data.
+7. The final step should provide the answer to the objective using the 'LLM' tool.
 
 Output Format:
-Step 1: [Description] | [Tool1(arg1=$0, arg2="literal value"), Tool2(arg1={{"key": "value"}})]
-Step 2: [Description] | [Tool1(arg1=$1, arg2=[1, 2, 3])]
+Step 1: [Description] | [Tool(arg1=$0, arg2="literal value", ...)]
+Step 2: [Description] | [Tool(arg1=$1, arg2={{"key": "value"}}, ...)]
 ...
-Final Answer: [Description of the final answer]
+Final Answer: [Description of the final answer] | [LLM(input=$n)]
+
+Always follow Output Format no matter what. Do not put any markdown header.
 """
 
 HUMAN_PROMPT = "Objective: {input}"
@@ -75,26 +80,59 @@ def parse_llm_output(output: str) -> Plan:
     steps = []
     final_answer = ""
 
+    def parse_args(args_string: str) -> Dict[str, Any]:
+        # Replace $n placeholders with {{$n}} for easier parsing
+        args_string = re.sub(r'\$(\d+)', r'{{$\1}}', args_string)
+
+        # Parse the arguments string as JSON
+        try:
+            args = json.loads(f"{{{args_string}}}")
+        except json.JSONDecodeError:
+            # If JSON parsing fails, fall back to a simple key-value parsing
+            args = {}
+            for pair in args_string.split(','):
+                if '=' in pair:
+                    key, value = pair.split('=', 1)
+                    args[key.strip()] = value.strip()
+
+        # Process the parsed arguments
+        for key, value in args.items():
+            if isinstance(value, str):
+                # Replace {{$n}} with integers
+                if value.startswith('{{$') and value.endswith('}}'):
+                    args[key] = int(value[3:-2])
+            elif isinstance(value, list):
+                args[key] = [int(v[3:-2]) if isinstance(v, str) and v.startswith('{{$') and v.endswith('}}') else v for
+                             v in value]
+
+        return args
+
     for line in lines:
-        if line.startswith("Step"):
-            parts = line.split("|")
+        if line.startswith("Step") or line.startswith("| Step"):
+            parts = line.split("|", 1)
             description = parts[0].split(":", 1)[1].strip()
-            tools = []
-            if len(parts) > 1:
-                tool_strings = parts[1].strip().split("),")
-                for tool_string in tool_strings:
-                    tool_parts = tool_string.split("(")
-                    tool_name = tool_parts[0].strip()
-                    args = {}
-                    if len(tool_parts) > 1:
-                        arg_strings = tool_parts[1].rstrip(")").split(",")
-                        for arg_string in arg_strings:
-                            key, value = arg_string.split("=")
-                            args[key.strip()] = eval(value.strip())  # Safely evaluate the argument value
-                    tools.append(ToolSelection(tool=tool_name, args=args))
-            steps.append(PlanStep(description=description, tools=tools))
-        elif line.startswith("Final Answer:"):
+            tool_string = parts[1].strip() if len(parts) > 1 else ""
+
+            tool_parts = tool_string.split("(", 1)
+            tool_name = tool_parts[0].strip()
+            args = {}
+            if len(tool_parts) > 1:
+                args_string = tool_parts[1].rstrip(")")
+                args = parse_args(args_string)
+
+            steps.append(PlanStep(description=description, tool=ToolSelection(tool=tool_name, args=args)))
+        elif line.startswith("Final Answer:") or line.startswith("| Final Answer:"):
             final_answer = line.split(":", 1)[1].strip()
+            if "|" in final_answer:
+                final_answer, tool_string = final_answer.split("|")
+                final_answer = final_answer.strip()
+                tool_parts = tool_string.strip().split("(", 1)
+                tool_name = tool_parts[0].strip()
+                args = {}
+                if len(tool_parts) > 1:
+                    args_string = tool_parts[1].rstrip(")")
+                    args = parse_args(args_string)
+                steps.append(PlanStep(description="Final Answer", tool=ToolSelection(tool=tool_name, args=args)))
 
     return Plan(steps=steps, final_answer=final_answer)
 

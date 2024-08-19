@@ -1,13 +1,15 @@
 import json
 from typing import Dict, Any, List, Annotated
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel, Field
+
+from datanarrate.config import config
 
 
 class OutputFormat(BaseModel):
@@ -20,14 +22,15 @@ class OutputFormat(BaseModel):
 
 
 class OutputState(BaseModel):
-    messages: Annotated[List[AIMessage | HumanMessage], add_messages]
+    messages: Annotated[List[BaseMessage], add_messages]
     analysis_results: str
     output: OutputFormat = None
 
 
 class OutputGenerator:
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview", temperature=0)
+        self.llm = ChatOpenAI(model_name=config.LLM_MODEL_NAME, openai_api_base=config.OPENAI_API_BASE,
+                              openai_api_key=config.OPENAI_API_KEY, temperature=0.2)
         self.prompt = ChatPromptTemplate.from_messages([
             ("system",
              "You are an expert data analyst. Summarize the analysis results, provide key points, insights, and suggest relevant visualizations. Also recommend next steps for further investigation."),

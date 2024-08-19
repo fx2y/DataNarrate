@@ -10,3 +10,4 @@ sqlparse
 elasticsearch-dsl
 pandas
 scipy
+matplotlib

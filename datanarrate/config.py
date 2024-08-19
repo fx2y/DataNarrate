@@ -27,5 +27,8 @@ class Config:
     # Other configurations
     LOG_LEVEL = env.str("LOG_LEVEL", "INFO")
 
+    MAX_STEPS = 10
+    MAX_REPLANS = 3
+
 
 config = Config()
