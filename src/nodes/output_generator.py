@@ -1,11 +1,12 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Annotated
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, State
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
 
@@ -18,7 +19,8 @@ class OutputFormat(BaseModel):
     next_steps: List[str] = Field(description="Suggested next steps or areas for further investigation")
 
 
-class OutputState(State):
+class OutputState(BaseModel):
+    messages: Annotated[List[AIMessage | HumanMessage], add_messages]
     analysis_results: str
     output: OutputFormat = None
 
@@ -34,9 +36,9 @@ class OutputGenerator:
         ])
         self.chain = self.prompt | self.llm.with_structured_output(OutputFormat)
 
-    async def agenerate(self, state: OutputState, config: RunnableConfig) -> Dict[str, Any]:
+    async def agenerate(self, state: OutputState) -> Dict[str, Any]:
         try:
-            output = await self.chain.ainvoke({"analysis_results": state.analysis_results}, config)
+            output = await self.chain.ainvoke({"analysis_results": state.analysis_results})
             return {"output": output}
         except Exception as e:
             print(f"Error in output generation: {str(e)}")
@@ -49,17 +51,56 @@ class OutputGenerator:
             )}
 
 
-async def generate_output(state: OutputState, config: RunnableConfig) -> Dict[str, Any]:
+async def generate_output(state: OutputState) -> Dict[str, Any]:
     generator = OutputGenerator()
-    result = await generator.agenerate(state, config)
+    result = await generator.agenerate(state)
     return {
         "output": result["output"],
         "messages": [AIMessage(content=json.dumps(result["output"].dict(), indent=2))]
     }
 
 
+def should_end(state: OutputState) -> str:
+    if state.output:
+        return END
+    return "generate_output"
+
+
 # Graph setup
 workflow = StateGraph(OutputState)
 workflow.add_node("generate_output", generate_output)
-# Add more nodes and edges as needed
+workflow.add_conditional_edges(
+    "generate_output",
+    should_end,
+    {
+        END: END,
+        "generate_output": "generate_output"  # Allow for potential retries
+    }
+)
+
+# Add any necessary tools
+tools = []  # Add any tools that might be needed
+tool_node = ToolNode(tools)
+workflow.add_node("tools", tool_node)
+
+# Compile the graph
 app = workflow.compile()
+
+
+# Example usage
+async def run_workflow(input_data: str):
+    initial_state = OutputState(
+        messages=[HumanMessage(content=input_data)],
+        analysis_results="Sample analysis results"
+    )
+    async for event in app.astream(initial_state):
+        if "output" in event:
+            print(json.dumps(event["output"].dict(), indent=2))
+        elif "messages" in event:
+            for message in event["messages"]:
+                if isinstance(message, AIMessage):
+                    print(f"AI: {message.content}")
+                elif isinstance(message, HumanMessage):
+                    print(f"Human: {message.content}")
+
+# To run: await run_workflow("Analyze the data and provide insights")
