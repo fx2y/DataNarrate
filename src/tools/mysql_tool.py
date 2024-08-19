@@ -1,9 +1,11 @@
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Annotated
 
 import pandas as pd
+from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.pydantic_v1 import BaseModel, Field, validator
-from langchain_core.tools import BaseTool
+from langchain_core.tools import StructuredTool
+from langgraph.prebuilt import InjectedState
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -22,7 +24,7 @@ class MySQLConfig(BaseModel):
         return v
 
 
-class MySQLTool(BaseTool):
+class MySQLTool(StructuredTool):
     name: str = "mysql_tool"
     description: str = "Execute SQL queries on a MySQL database, list tables, or describe table schemas"
     config: MySQLConfig = Field(..., description="MySQL connection configuration")
@@ -33,11 +35,8 @@ class MySQLTool(BaseTool):
         return f"{dialect}://{self.config.user}:{self.config.password}@{self.config.host}:{self.config.port}/{self.config.database}"
 
     def _sanitize_query(self, query: str) -> str:
-        # Basic SQL injection prevention
-        # Remove comments
         query = re.sub(r'/\*.*?\*/', '', query)
         query = re.sub(r'--.*$', '', query, flags=re.MULTILINE)
-        # Remove semicolons and multiple spaces
         query = re.sub(r'\s+', ' ', query).strip()
         return query
 
@@ -69,10 +68,11 @@ class MySQLTool(BaseTool):
         inspector = inspect(engine)
         return [{'name': col['name'], 'type': str(col['type'])} for col in inspector.get_columns(table_name)]
 
-    def run(
+    def _run(
             self,
             query: str,
-            state: Optional[Dict[str, Any]] = None
+            state: Annotated[Dict[str, Any], InjectedState] = None,
+            run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
         try:
             if query.lower().startswith("list tables"):
@@ -87,10 +87,11 @@ class MySQLTool(BaseTool):
         except Exception as e:
             return f"Error executing query: {str(e)}\nQuery: {query}"
 
-    async def arun(
+    async def _arun(
             self,
             query: str,
-            state: Optional[Dict[str, Any]] = None
+            state: Annotated[Dict[str, Any], InjectedState] = None,
+            run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
         try:
             if query.lower().startswith("list tables"):
