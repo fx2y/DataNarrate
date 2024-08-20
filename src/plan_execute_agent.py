@@ -1,20 +1,20 @@
-import json
 import operator
 from typing import Annotated, List, Tuple, Literal, Dict, Any, Optional, Union
-from typing_extensions import TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
 
 from datanarrate.config import config
 from datanarrate.schema_retriever import SchemaRetriever
 from nodes.analyze_query import analyze_query, QueryAnalysis
-from nodes.execute_step import execute_step, ExecuteStepState
+from nodes.execute_step import ExecuteStepState
 from nodes.generate_output import generate_output, OutputState, OutputFormat
 from nodes.plan_task import plan_task_and_select_tools, PlanningState, Plan
 from nodes.reason import ReasoningNode, ReasoningConfig, ReasoningState
+from src.nodes.execute_step import StepExecutor
 # Assume we have these tool implementations
 from tools.mysql_tool import create_mysql_tool, MySQLConfig
 from tools.visualization_tool import VisualizationTool
@@ -53,7 +53,7 @@ import matplotlib.pyplot as plt
 
 
 @tool
-def data_extractor(source: str, query: str, parameters: dict = None) -> Dict[str, Any]:
+def data_extractor(source: str, query: str) -> Dict[str, Any]:
     """
     Extracts data from a specified source using a query.
 
@@ -65,9 +65,13 @@ def data_extractor(source: str, query: str, parameters: dict = None) -> Dict[str
     Returns:
     Dict[str, Any]: Extracted data as a dictionary representation of a DataFrame
     """
-    # Implementation details...
-    # For example:
-    df = pd.DataFrame({"column1": [1, 2, 3], "column2": ["a", "b", "c"]})
+    if source.lower() == 'mysql':
+        result = mysql_tools.run(query)
+        df = pd.DataFrame(result)
+    else:
+        # Fallback for other sources or placeholder for future implementations
+        df = pd.DataFrame({"column1": [1, 2, 3], "column2": ["a", "b", "c"]})
+
     return df.to_dict(orient="split")
 
 
@@ -237,6 +241,8 @@ async def plan_node(state: PlanExecuteState) -> Dict[str, Any]:
 
 reasoning_node = ReasoningNode(ReasoningConfig(llm=llm))
 
+executor = StepExecutor(tools)
+
 
 async def execute_node(state: PlanExecuteState) -> Dict[str, Any]:
     current_step = state["plan"].steps[state["current_step"]]
@@ -247,7 +253,7 @@ async def execute_node(state: PlanExecuteState) -> Dict[str, Any]:
         current_step=current_step,
         current_step_index=state["current_step"]
     )
-    result = await execute_step(execute_state, tools)
+    result = await executor.execute_step(execute_state)
 
     new_state = {
         "messages": state["messages"] + result["messages"],

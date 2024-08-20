@@ -18,7 +18,7 @@ class ToolSelection(BaseModel):
 
 class PlanStep(BaseModel):
     description: str
-    tool: ToolSelection
+    # tool: ToolSelection
 
 
 class Plan(BaseModel):
@@ -109,30 +109,32 @@ def parse_llm_output(output: str) -> Plan:
 
     for line in lines:
         if line.startswith("Step") or line.startswith("| Step"):
-            parts = line.split("|", 1)
-            description = parts[0].split(":", 1)[1].strip()
-            tool_string = parts[1].strip() if len(parts) > 1 else ""
+            # parts = line.split("|", 1)
+            # description = parts[0].split(":", 1)[1].strip()
+            # tool_string = parts[1].strip() if len(parts) > 1 else ""
+            #
+            # tool_parts = tool_string.split("(", 1)
+            # tool_name = tool_parts[0].strip()
+            # args = {}
+            # if len(tool_parts) > 1:
+            #     args_string = tool_parts[1].rstrip(")")
+            #     args = parse_args(args_string)
 
-            tool_parts = tool_string.split("(", 1)
-            tool_name = tool_parts[0].strip()
-            args = {}
-            if len(tool_parts) > 1:
-                args_string = tool_parts[1].rstrip(")")
-                args = parse_args(args_string)
-
-            steps.append(PlanStep(description=description, tool=ToolSelection(tool=tool_name, args=args)))
+            # steps.append(PlanStep(description=line, tool=ToolSelection(tool=tool_name, args=args)))
+            steps.append(PlanStep(description=line))
         elif line.startswith("Final Answer:") or line.startswith("| Final Answer:"):
             final_answer = line.split(":", 1)[1].strip()
-            if "|" in final_answer:
-                final_answer, tool_string = final_answer.split("|")
-                final_answer = final_answer.strip()
-                tool_parts = tool_string.strip().split("(", 1)
-                tool_name = tool_parts[0].strip()
-                args = {}
-                if len(tool_parts) > 1:
-                    args_string = tool_parts[1].rstrip(")")
-                    args = parse_args(args_string)
-                steps.append(PlanStep(description="Final Answer", tool=ToolSelection(tool=tool_name, args=args)))
+            # if "|" in final_answer:
+            #     final_answer, tool_string = final_answer.split("|")
+            #     final_answer = final_answer.strip()
+            #     tool_parts = tool_string.strip().split("(", 1)
+            #     tool_name = tool_parts[0].strip()
+            #     args = {}
+            #     if len(tool_parts) > 1:
+            #         args_string = tool_parts[1].rstrip(")")
+            #         args = parse_args(args_string)
+            #     steps.append(PlanStep(description="Final Answer", tool=ToolSelection(tool=tool_name, args=args)))
+            steps.append(PlanStep(description=final_answer))
 
     return Plan(steps=steps, final_answer=final_answer)
 
