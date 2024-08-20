@@ -1,4 +1,5 @@
 import getpass
+import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -16,8 +17,13 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, START
 from langgraph.graph.message import add_messages
-from output_parser import LLMCompilerPlanParser, Task
 from typing_extensions import TypedDict
+
+from output_parser import LLMCompilerPlanParser, Task
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # Helper function to get environment variables
@@ -27,11 +33,15 @@ def _get_pass(var: str):
 
 
 # Set up environment variables for tracing
-os.environ["LANGCHAIN_TRACING_V2"] = "True"
-os.environ["LANGCHAIN_PROJECT"] = "LLMCompiler"
-_get_pass("LANGCHAIN_API_KEY")
-_get_pass("OPENAI_API_KEY")
-_get_pass("TAVILY_API_KEY")
+def setup_environment():
+    os.environ["LANGCHAIN_TRACING_V2"] = "True"
+    os.environ["LANGCHAIN_PROJECT"] = "LLMCompiler"
+    _get_pass("LANGCHAIN_API_KEY")
+    _get_pass("OPENAI_API_KEY")
+    _get_pass("TAVILY_API_KEY")
+
+
+setup_environment()
 
 # Define tools
 calculate = get_math_tool(ChatOpenAI(model="gpt-4-turbo-preview"))
@@ -115,10 +125,12 @@ def _execute_task(task, observations, config):
         else:
             resolved_args = args
     except Exception as e:
+        logger.error(f"Failed to resolve args for {tool_to_use.name} with args {args}. Error: {repr(e)}")
         return f"ERROR(Failed to call {tool_to_use.name} with args {args}. Args could not be resolved. Error: {repr(e)})"
     try:
         return tool_to_use.invoke(resolved_args, config)
     except Exception as e:
+        logger.error(f"Failed to call {tool_to_use.name} with resolved args {resolved_args}. Error: {repr(e)}")
         return f"ERROR(Failed to call {tool_to_use.name} with args {args}. Args resolved to {resolved_args}. Error: {repr(e)})"
 
 
