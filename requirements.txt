@@ -11,3 +11,4 @@ elasticsearch-dsl
 pandas
 scipy
 matplotlib
+numexpr

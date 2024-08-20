@@ -1,9 +1,10 @@
 import getpass
+import itertools
 import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
-from typing import Sequence, List, Dict, Any, Union, Iterable
+from typing import Sequence, List, Dict, Any, Union, Iterable, Annotated
 
 from langchain import hub
 from langchain.chains.openai_functions import create_structured_output_runnable
@@ -12,13 +13,14 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, FunctionMessage, HumanMessage, SystemMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
-from langchain_core.runnables import RunnableBranch, as_runnable
+from langchain_core.runnables import RunnableBranch, chain as as_runnable
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, START
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from math_tools import get_math_tool
 from output_parser import LLMCompilerPlanParser, Task
 
 # Configure logging
@@ -27,18 +29,18 @@ logger = logging.getLogger(__name__)
 
 
 # Helper function to get environment variables
-def _get_pass(var: str):
-    if var not in os.environ:
-        os.environ[var] = getpass.getpass(f"{var}: ")
+def _set_if_undefined(var: str):
+    if not os.environ.get(var):
+        os.environ[var] = getpass.getpass(f"Please provide your {var}")
 
 
 # Set up environment variables for tracing
 def setup_environment():
     os.environ["LANGCHAIN_TRACING_V2"] = "True"
     os.environ["LANGCHAIN_PROJECT"] = "LLMCompiler"
-    _get_pass("LANGCHAIN_API_KEY")
-    _get_pass("OPENAI_API_KEY")
-    _get_pass("TAVILY_API_KEY")
+    _set_if_undefined("LANGCHAIN_API_KEY")
+    _set_if_undefined("OPENAI_API_KEY")
+    _set_if_undefined("TAVILY_API_KEY")
 
 
 setup_environment()
@@ -54,6 +56,16 @@ tools = [search, calculate]
 
 # Planner creation function
 def create_planner(llm: BaseChatModel, tools: Sequence[BaseTool], base_prompt: ChatPromptTemplate):
+    """Create a planner for the given LLM and tools.
+
+    Args:
+        llm (BaseChatModel): The language model to use.
+        tools (Sequence[BaseTool]): The tools available to the planner.
+        base_prompt (ChatPromptTemplate): The base prompt template.
+
+    Returns:
+        RunnableBranch: The planner runnable branch.
+    """
     tool_descriptions = "\n".join(
         f"{i + 1}. {tool.description}\n" for i, tool in enumerate(tools)
     )
@@ -99,6 +111,14 @@ def create_planner(llm: BaseChatModel, tools: Sequence[BaseTool], base_prompt: C
 
 # Task Fetching Unit
 def _get_observations(messages: List[BaseMessage]) -> Dict[int, Any]:
+    """Extract observations from messages.
+
+    Args:
+        messages (List[BaseMessage]): The list of messages.
+
+    Returns:
+        Dict[int, Any]: A dictionary of observations indexed by task ID.
+    """
     results = {}
     for message in messages[::-1]:
         if isinstance(message, FunctionMessage):
@@ -113,6 +133,16 @@ class SchedulerInput(TypedDict):
 
 
 def _execute_task(task, observations, config):
+    """Execute a given task with resolved arguments.
+
+    Args:
+        task (Task): The task to execute.
+        observations (Dict[int, Any]): The observations from previous tasks.
+        config (Any): The configuration for the task.
+
+    Returns:
+        Any: The result of the task execution.
+    """
     tool_to_use = task["tool"]
     if isinstance(tool_to_use, str):
         return tool_to_use
@@ -135,6 +165,15 @@ def _execute_task(task, observations, config):
 
 
 def _resolve_arg(arg: Union[str, Any], observations: Dict[int, Any]):
+    """Resolve arguments using observations.
+
+    Args:
+        arg (Union[str, Any]): The argument to resolve.
+        observations (Dict[int, Any]): The observations from previous tasks.
+
+    Returns:
+        Any: The resolved argument.
+    """
     ID_PATTERN = r"\$\{?(\d+)\}?"
 
     def replace_match(match):
@@ -151,6 +190,12 @@ def _resolve_arg(arg: Union[str, Any], observations: Dict[int, Any]):
 
 @as_runnable
 def schedule_task(task_inputs, config):
+    """Schedule a single task for execution.
+
+    Args:
+        task_inputs (Dict[str, Any]): The inputs for the task.
+        config (Any): The configuration for the task.
+    """
     task: Task = task_inputs["task"]
     observations: Dict[int, Any] = task_inputs["observations"]
     try:
@@ -161,6 +206,13 @@ def schedule_task(task_inputs, config):
 
 
 def schedule_pending_task(task: Task, observations: Dict[int, Any], retry_after: float = 0.2):
+    """Schedule a pending task for execution.
+
+    Args:
+        task (Task): The task to schedule.
+        observations (Dict[int, Any]): The observations from previous tasks.
+        retry_after (float, optional): The retry interval. Defaults to 0.2.
+    """
     while True:
         deps = task["dependencies"]
         if deps and (any([dep not in observations for dep in deps])):
@@ -171,6 +223,14 @@ def schedule_pending_task(task: Task, observations: Dict[int, Any], retry_after:
 
 @as_runnable
 def schedule_tasks(scheduler_input: SchedulerInput) -> List[FunctionMessage]:
+    """Schedule multiple tasks for execution.
+
+    Args:
+        scheduler_input (SchedulerInput): The input for the scheduler.
+
+    Returns:
+        List[FunctionMessage]: The list of function messages.
+    """
     tasks = scheduler_input["tasks"]
     messages = scheduler_input["messages"]
     observations = _get_observations(messages)
@@ -183,6 +243,30 @@ def schedule_tasks(scheduler_input: SchedulerInput) -> List[FunctionMessage]:
         k: FunctionMessage(name=f"task_{k}", content=v) for k, v in observations.items()
     }
     return list(new_observations.values())
+
+
+llm = ChatOpenAI(model="gpt-4-turbo-preview")
+prompt = hub.pull("wfh/llm-compiler")
+planner = create_planner(llm, tools, prompt)
+
+
+@as_runnable
+def plan_and_schedule(state):
+    messages = state["messages"]
+    tasks = planner.stream(messages)
+    # Begin executing the planner immediately
+    try:
+        tasks = itertools.chain([next(tasks)], tasks)
+    except StopIteration:
+        # Handle the case where tasks is empty.
+        tasks = iter([])
+    scheduled_tasks = schedule_tasks.invoke(
+        {
+            "messages": messages,
+            "tasks": tasks,
+        }
+    )
+    return {"messages": [scheduled_tasks]}
 
 
 # Joiner
@@ -201,11 +285,18 @@ class JoinOutputs(BaseModel):
 
 
 joiner_prompt = hub.pull("wfh/llm-compiler-joiner").partial(examples="")
-llm = ChatOpenAI(model="gpt-4-turbo-preview")
 runnable = create_structured_output_runnable(JoinOutputs, llm, joiner_prompt)
 
 
 def _parse_joiner_output(decision: JoinOutputs) -> List[BaseMessage]:
+    """Parse the output from the joiner.
+
+    Args:
+        decision (JoinOutputs): The decision from the joiner.
+
+    Returns:
+        List[BaseMessage]: The list of messages.
+    """
     response = [AIMessage(content=f"Thought: {decision.thought}")]
     if isinstance(decision.action, Replan):
         response.append(SystemMessage(content=decision.action.feedback))
@@ -215,6 +306,14 @@ def _parse_joiner_output(decision: JoinOutputs) -> List[BaseMessage]:
 
 
 def select_recent_messages(state) -> dict:
+    """Select recent messages from the state.
+
+    Args:
+        state (dict): The state containing messages.
+
+    Returns:
+        dict: The selected recent messages.
+    """
     messages = state["messages"]
     selected = []
     for msg in messages[::-1]:
@@ -240,6 +339,14 @@ graph_builder.add_edge("plan_and_schedule", "join")
 
 
 def should_continue(state):
+    """Determine if the process should continue.
+
+    Args:
+        state (dict): The current state.
+
+    Returns:
+        str: The next step in the process.
+    """
     messages = state["messages"]
     if isinstance(messages[-1], AIMessage):
         return "plan_and_schedule"
