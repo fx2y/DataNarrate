@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, List, Optional
 
 from langchain_core.messages import AnyMessage, AIMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -12,7 +12,12 @@ from sql_agent.util import create_tool_node_with_fallback
 
 
 class State(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
+    messages: Annotated[List[AnyMessage], add_messages]
+    schema: Optional[str]
+    query: Optional[str]
+    results: Optional[str]
+    visualization_data: Optional[dict]
+    narration: Optional[str]
 
 
 def create_query_gen(llm):
