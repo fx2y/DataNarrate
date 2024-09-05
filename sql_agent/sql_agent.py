@@ -1,12 +1,14 @@
-from typing import Annotated, TypedDict
+from typing import Annotated, TypedDict, Literal
 from typing import Optional
 
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_core.language_models import BaseLanguageModel
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
@@ -17,11 +19,13 @@ from datanarrate.config import config as cfg
 
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    user_request: str
     schema: str
     query: str
     results: list
     visualization_data: dict
     narration: str
+    need_human_input: bool
 
 
 class DatabaseConfig(BaseModel):
@@ -82,11 +86,95 @@ def get_database_schema(toolkit: SQLDatabaseToolkit, config: RunnableConfig) -> 
         raise ValueError(f"Error retrieving database schema: {str(e)}") from e
 
 
+class DecisionOutput(TypedDict):
+    decision: Literal["clarify", "query"]
+    content: str
+
+
+def analyze_request(user_request: str, db_schema: str, model: ChatOpenAI) -> DecisionOutput:
+    """
+    Analyzes the user's request and database schema to decide whether to ask for clarification or craft a SQL query.
+
+    Args:
+        user_request (str): The user's natural language request.
+        db_schema (str): The database schema.
+        model (ChatOpenAI): The language model to use for decision-making.
+
+    Returns:
+        DecisionOutput: A dictionary containing the decision and either a clarification question or SQL query.
+
+    Raises:
+        ValueError: If there's an error in processing the request.
+    """
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are an AI assistant that analyzes user requests and database schemas to decide whether to ask for clarification or craft a SQL query. If the request is clear and can be answered with the given schema, craft a SQL query. Otherwise, ask for clarification."),
+        ("human",
+         "User request: {request}\n\nDatabase schema:\n{schema}\n\nDecide whether to clarify or query, and provide the appropriate response."),
+    ])
+
+    try:
+        response = model.invoke(prompt.format(request=user_request, schema=db_schema))
+
+        if "CLARIFY:" in response.content:
+            return {"decision": "clarify", "content": response.content.split("CLARIFY:", 1)[1].strip()}
+        elif "SQL:" in response.content:
+            return {"decision": "query", "content": response.content.split("SQL:", 1)[1].strip()}
+        else:
+            raise ValueError("Unexpected response format from the model")
+
+    except Exception as e:
+        raise ValueError(f"Error processing request: {str(e)}") from e
+
+
+def analyze_request_node(state: State) -> dict:
+    decision = analyze_request(state["user_request"], state["schema"], model)
+    if decision["decision"] == "clarify":
+        return {"messages": [AIMessage(content=decision["content"])]}
+    else:
+        return {"query": decision["content"]}
+
+
+def clarify_request_node(state: State) -> dict:
+    clarification_response = state["messages"][-1].content
+    new_request = f"{state['user_request']} (Clarification: {clarification_response})"
+    return {
+        "user_request": new_request,
+        "need_human_input": True
+    }
+
+
+def human_input_node(state: State) -> dict:
+    print("Clarification needed. Current request:", state["user_request"])
+    user_input = input("Please provide additional information: ")
+    return {
+        "user_request": f"{state['user_request']} (Human input: {user_input})",
+        "need_human_input": False,
+        "messages": [HumanMessage(content=user_input)]
+    }
+
+
+def should_clarify(state: State) -> Literal["clarify", "execute_query"]:
+    if state.get("query"):
+        return "execute_query"
+    return "clarify"
+
+
+def should_get_human_input(state: State) -> Literal["human_input", "analyze"]:
+    if state["need_human_input"]:
+        return "human_input"
+    return "analyze"
+
+
 def create_graph(toolkit: SQLDatabaseToolkit, llm: BaseLanguageModel) -> CompiledStateGraph:
     workflow = StateGraph(State)
 
     # Add the get_database_schema node
     workflow.add_node("get_schema", lambda state, config: get_database_schema(toolkit, config))
+
+    workflow.add_node("analyze", analyze_request_node)
+    workflow.add_node("clarify", clarify_request_node)
+    workflow.add_node("human_input", human_input_node)
 
     # Add other nodes (placeholder functions for now)
     workflow.add_node("generate_query", lambda state: {"query": "SELECT * FROM example_table"})
@@ -95,7 +183,9 @@ def create_graph(toolkit: SQLDatabaseToolkit, llm: BaseLanguageModel) -> Compile
     workflow.add_node("generate_narration", lambda state: {"narration": "Here's what the data shows..."})
 
     # Define the edges
-    workflow.add_edge("get_schema", "generate_query")
+    workflow.add_edge("get_schema", "analyze")
+    workflow.add_conditional_edges("analyze", should_clarify)
+    workflow.add_conditional_edges("clarify", should_get_human_input)
     workflow.add_edge("generate_query", "execute_query")
     workflow.add_edge("execute_query", "visualize_results")
     workflow.add_edge("visualize_results", "generate_narration")
@@ -104,7 +194,7 @@ def create_graph(toolkit: SQLDatabaseToolkit, llm: BaseLanguageModel) -> Compile
     # Set the entry point
     workflow.set_entry_point("get_schema")
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=MemorySaver(), interrupt_before=["action"])
 
 
 if __name__ == '__main__':
@@ -149,5 +239,9 @@ if __name__ == '__main__':
     config = DatabaseConfig(uri=cfg.SQLALCHEMY_DATABASE_URI)
     toolkit = create_sql_database_tool(config, llm)
     graph = create_graph(toolkit, llm)
+    config = {"configurable": {"thread_id": "thread-1"}}
 
-    result = graph.invoke({"messages": [HumanMessage(content="Analyze the sales data")]})
+    result = graph.invoke({"messages": [HumanMessage(
+        content="Create a line chart showing the economic growth trends for all provinces from 2018 to 2023.")]},
+        config=config)
+    snapshot = graph.get_state(config)
