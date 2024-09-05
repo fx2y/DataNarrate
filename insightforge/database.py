@@ -1,7 +1,9 @@
+import ast
 import json
 import re
 from typing import Dict, Any, Tuple
 
+import pandas as pd
 import plotly.graph_objs as go
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_community.utilities import SQLDatabase
@@ -9,6 +11,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
+from langgraph.constants import END
+from langgraph.graph import StateGraph
 
 from datanarrate.config import config
 from insightforge.state import State
@@ -44,8 +48,7 @@ def retrieve_schema(toolkit: SQLDatabaseToolkit) -> Dict[str, Any]:
     return {"schema": schema}
 
 
-def update_state_with_schema(state: State) -> State:
-    toolkit = create_sql_database_toolkit()
+def update_state_with_schema(state: State, toolkit: SQLDatabaseToolkit) -> State:
     schema_info = retrieve_schema(toolkit)
     state["schema"] = schema_info["schema"]
     return state
@@ -130,6 +133,73 @@ def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> State:
     return state
 
 
+def extract_column_names(query: str) -> list:
+    # Simple regex to extract column names from SELECT statement
+    match = re.search(r'SELECT\s+(.*?)\s+FROM', query, re.IGNORECASE | re.DOTALL)
+    if match:
+        columns = [col.strip() for col in match.group(1).split(',')]
+        return [col.split()[-1] for col in columns]  # Handle cases like "MAX(column) AS max_column"
+    return []
+
+
+def preprocess_query_results(state: State) -> State:
+    """
+    Clean and preprocess the query results before visualization or analysis.
+
+    Args:
+        state (State): The current state containing query results.
+
+    Returns:
+        State: Updated state with preprocessed data.
+    """
+    if not state.get("results"):
+        state["messages"].append(AIMessage("No results to preprocess."))
+        return state
+
+    try:
+        # Extract column names from the query
+        column_names = extract_column_names(state["query"])
+
+        # Convert string results to a list of tuples
+        results_list = ast.literal_eval(state["results"])
+
+        # Convert results to a pandas DataFrame for easier manipulation
+        df = pd.DataFrame(results_list, columns=column_names)
+
+        # Basic cleaning steps
+        df = df.dropna()  # Remove rows with missing values
+        df = df.drop_duplicates()  # Remove duplicate rows
+
+        # Convert date columns to datetime type
+        date_columns = df.select_dtypes(include=['object']).columns
+        for col in date_columns:
+            try:
+                df[col] = pd.to_datetime(df[col])
+            except ValueError:
+                pass  # Column couldn't be converted to datetime
+
+        # Convert numeric columns to appropriate types
+        df = df.apply(pd.to_numeric, errors='ignore')
+
+        # Sort the DataFrame if there's a date column
+        if 'date' in df.columns:
+            df = df.sort_values('date')
+
+        # Store the preprocessed data back in the state
+        state["preprocessed_data"] = df.to_dict(orient='records')
+
+        # Log the preprocessing steps
+        preprocessing_summary = f"Preprocessed {len(df)} rows. Cleaned missing values and duplicates. Converted date and numeric columns."
+        state["messages"].append(AIMessage(preprocessing_summary))
+
+    except Exception as e:
+        error_message = f"Error during data preprocessing: {str(e)}"
+        state["messages"].append(AIMessage(error_message))
+        state["preprocessed_data"] = None
+
+    return state
+
+
 def generate_visualization_and_narration(state: State) -> State:
     llm = ChatOpenAI(
         model_name=config.LLM_MODEL_NAME,
@@ -171,6 +241,61 @@ def generate_visualization_and_narration(state: State) -> State:
     return state
 
 
+def build_graph(toolkit) -> Any:
+    graph = StateGraph(State)
+
+    # Define nodes
+    graph.add_node("retrieve_schema", lambda state: update_state_with_schema(state, toolkit))
+    graph.add_node("decide_action", update_state_with_decision)
+    graph.add_node("execute_query", lambda state: execute_query(state, toolkit))
+    graph.add_node("preprocess_data", preprocess_query_results)
+    graph.add_node("generate_output", generate_visualization_and_narration)
+
+    # Define edges
+    graph.add_edge("retrieve_schema", "decide_action")
+
+    # Conditional edge from decide_action
+    def route_action(state: State):
+        if state.get("query"):
+            return "execute_query"
+        else:
+            return END
+
+    graph.add_edge("retrieve_schema", "decide_action")
+    graph.add_conditional_edges("decide_action", route_action)
+    graph.add_edge("execute_query", "preprocess_data")
+    graph.add_edge("preprocess_data", "generate_output")
+    graph.add_edge("generate_output", END)
+
+    # Set the entrypoint
+    graph.set_entry_point("retrieve_schema")
+
+    return graph.compile()
+
+
+def process_user_input(user_input: str):
+    toolkit = create_sql_database_toolkit()
+    graph = build_graph(toolkit)
+
+    initial_state = State(
+        messages=[HumanMessage(user_input)],
+        schema=None,
+        query=None,
+        results=None,
+        preprocessed_data=None,
+        visualization_data=None,
+        narration=None
+    )
+
+    for step in graph.stream(initial_state):
+        current_node, current_state = list(step.items())[0]
+        if current_node == "execute_query":
+            current_state = execute_query(current_state, toolkit)
+
+    final_state = list(step.values())[0]
+    return final_state["visualization_data"], final_state["narration"]
+
+
 def test_decide_action():
     # Set up the initial state
     toolkit = create_sql_database_toolkit()
@@ -185,24 +310,25 @@ def test_decide_action():
 
     for case in test_cases:
         print(f"\nTest case: {case}")
-        state = State(
-            messages=[],
-            schema=schema_info["schema"],
-            query=None,
-            results=None,
-            visualization_data=None,
-            narration=None
-        )
-        state["messages"] = [HumanMessage(case)]
-        state = update_state_with_decision(state)
-        if state["query"] is not None:
-            query = state["query"]
-            print(f"SQL query: {query}")
-            state = execute_query(state, toolkit)
-            state = generate_visualization_and_narration(state)
-        else:
-            clarification = state["messages"][-1].content
-            print(f"Clarification question: {clarification}")
+        vis_data, narration = process_user_input(case)
+        # state = State(
+        #     messages=[HumanMessage(case)],
+        #     schema=schema_info["schema"],
+        #     query=None,
+        #     results=None,
+        #     visualization_data=None,
+        #     narration=None
+        # )
+        # state = update_state_with_decision(state)
+        # if state["query"] is not None:
+        #     query = state["query"]
+        #     print(f"SQL query: {query}")
+        #     state = execute_query(state, toolkit)
+        #     state = preprocess_query_results(state)
+        #     state = generate_visualization_and_narration(state)
+        # else:
+        #     clarification = state["messages"][-1].content
+        #     print(f"Clarification question: {clarification}")
 
 
 if __name__ == "__main__":

@@ -10,5 +10,6 @@ class State(TypedDict):
     schema: Optional[str]
     query: Optional[str]
     results: Optional[List[dict]]
+    preprocessed_data: Optional[dict]
     visualization_data: Optional[dict]
     narration: Optional[str]
