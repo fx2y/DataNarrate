@@ -1,5 +1,8 @@
+import json
+import re
 from typing import Dict, Any, Tuple
 
+import plotly.graph_objs as go
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_community.utilities import SQLDatabase
 from langchain_core.messages import HumanMessage, AIMessage
@@ -91,9 +94,80 @@ def decide_action(state: State) -> Tuple[str, str]:
 def update_state_with_decision(state: State) -> State:
     decision, output = decide_action(state)
     if decision == "clarify":
-        state["messages"] = [AIMessage(output)]
+        state["messages"] += [AIMessage(output)]
     else:
         state["query"] = output
+    return state
+
+
+def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> State:
+    """
+    Execute the SQL query using the SQLDatabaseToolkit and return the results as part of the State.
+    """
+    if not state.get("query"):
+        raise ValueError("No SQL query found in the state")
+
+    # Get the SQL database query tool
+    db_query_tool = next(tool for tool in toolkit.get_tools() if tool.name == "sql_db_query")
+
+    try:
+        # Execute the query
+        results = db_query_tool.invoke(state["query"])
+
+        # Update the state with the query results
+        state["results"] = results
+
+        # Log the successful query execution
+        print(f"Successfully executed query: {state['query']}")
+
+    except Exception as e:
+        # Handle any errors during query execution
+        error_message = f"Error executing query: {str(e)}"
+        print(error_message)
+        state["results"] = None
+        state["messages"] += [AIMessage(error_message)]
+
+    return state
+
+
+def generate_visualization_and_narration(state: State) -> State:
+    llm = ChatOpenAI(
+        model_name=config.LLM_MODEL_NAME,
+        openai_api_base=config.OPENAI_API_BASE,
+        openai_api_key=config.OPENAI_API_KEY,
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are an AI assistant that generates visualizations and narrations based on data. Provide Plotly JSON for visualization and a narration explaining insights."),
+        ("human", "Preprocessed data: {preprocessed_data}"),
+        ("human",
+         "Generate a visualization and narration. Use <visualization></visualization> tags for Plotly JSON and <narration></narration> tags for the narration.")
+    ])
+
+    response = llm.invoke(prompt.format(preprocessed_data=state["results"]))
+
+    try:
+        visualization_match = re.search(r'<visualization>(.*?)</visualization>', response.content, re.DOTALL)
+        narration_match = re.search(r'<narration>(.*?)</narration>', response.content, re.DOTALL)
+
+        if visualization_match and narration_match:
+            visualization_data = json.loads(visualization_match.group(1))
+            narration = narration_match.group(1).strip()
+
+            # Validate Plotly JSON
+            go.Figure(visualization_data)
+
+            state["visualization_data"] = visualization_data
+            state["narration"] = narration
+        else:
+            raise ValueError("Visualization or narration not found in the response")
+
+    except Exception as e:
+        error_message = f"Error generating visualization and narration: {str(e)}"
+        print(error_message)
+        state["messages"].append(AIMessage(error_message))
+
     return state
 
 
@@ -101,15 +175,6 @@ def test_decide_action():
     # Set up the initial state
     toolkit = create_sql_database_toolkit()
     schema_info = retrieve_schema(toolkit)
-
-    state = State(
-        messages=[],
-        schema=schema_info["schema"],
-        query=None,
-        results=None,
-        visualization_data=None,
-        narration=None
-    )
 
     # Test cases
     test_cases = [
@@ -120,13 +185,24 @@ def test_decide_action():
 
     for case in test_cases:
         print(f"\nTest case: {case}")
+        state = State(
+            messages=[],
+            schema=schema_info["schema"],
+            query=None,
+            results=None,
+            visualization_data=None,
+            narration=None
+        )
         state["messages"] = [HumanMessage(case)]
-        decision, output = decide_action(state)
-        print(f"Decision: {decision}")
-        if decision == 'clarify':
-            print(f"Clarification question: {output}")
+        state = update_state_with_decision(state)
+        if state["query"] is not None:
+            query = state["query"]
+            print(f"SQL query: {query}")
+            state = execute_query(state, toolkit)
+            state = generate_visualization_and_narration(state)
         else:
-            print(f"SQL query: {output}")
+            clarification = state["messages"][-1].content
+            print(f"Clarification question: {clarification}")
 
 
 if __name__ == "__main__":
