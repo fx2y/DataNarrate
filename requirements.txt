@@ -12,3 +12,4 @@ pandas
 scipy
 langfuse
 plotly
+python-fasthtml
