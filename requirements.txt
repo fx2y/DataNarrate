@@ -13,3 +13,4 @@ scipy
 langfuse
 plotly
 python-fasthtml
+langserve[all]

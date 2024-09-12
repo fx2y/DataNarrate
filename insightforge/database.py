@@ -1,21 +1,31 @@
 import ast
 import json
+import logging
 import re
-from typing import Dict, Any, Tuple
+import uuid
+from functools import lru_cache
+from typing import Dict, Any, Tuple, List, Union
 
 import pandas as pd
 import plotly.graph_objs as go
+from fastapi import FastAPI
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_community.utilities import SQLDatabase
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
 from langgraph.constants import END
 from langgraph.graph import StateGraph
+from langserve import add_routes
 
 from datanarrate.config import config
 from insightforge.state import State
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 REFLECTION_SYSTEM_PROMPT = """
 You are an AI assistant designed to provide detailed, step-by-step responses. Your outputs should follow this structure:
@@ -145,12 +155,12 @@ def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> State:
         state["results"] = results
 
         # Log the successful query execution
-        print(f"Successfully executed query: {state['query']}")
+        logger.info(f"Successfully executed query: {state['query']}")
 
     except Exception as e:
         # Handle any errors during query execution
         error_message = f"Error executing query: {str(e)}"
-        print(error_message)
+        logger.error(error_message)
         state["results"] = None
         state["messages"] += [AIMessage(error_message)]
 
@@ -260,7 +270,7 @@ def generate_visualization_and_narration(state: State) -> State:
 
     except Exception as e:
         error_message = f"Error generating visualization and narration: {str(e)}"
-        print(error_message)
+        logger.error(error_message)
         state["messages"].append(AIMessage(error_message))
 
     return state
@@ -298,6 +308,49 @@ def build_graph(toolkit) -> Any:
     return graph.compile()
 
 
+@lru_cache(maxsize=100)
+def cached_process_user_input(user_input: str):
+    return process_user_input(user_input)
+
+
+app = FastAPI(
+    title="LangChain Server",
+    version="1.0",
+    description="Spin up a simple api server using LangChain's Runnable interfaces",
+)
+
+
+class Input(BaseModel):
+    input: str
+    chat_history: List[Union[HumanMessage, AIMessage]] = Field(
+        ...,
+        extra={"widget": {"type": "chat", "input": "input", "output": "output"}},
+    )
+
+
+class Output(BaseModel):
+    output: Any
+
+
+def inp(inpt: Input) -> dict:
+    return {"messages": inpt["chat_history"] + [HumanMessage(inpt["input"])]}
+
+
+def outp(outpt) -> str:
+    return next(iter(outpt.values()))['messages'][-1].content
+
+
+toolkit = create_sql_database_toolkit()
+
+add_routes(
+    app,
+    (RunnableLambda(inp) | build_graph(toolkit) | RunnableLambda(outp)).with_types(input_type=Input,
+                                                                                   output_type=Output).with_config(
+        {"configurable": {"thread_id": uuid.uuid4()}}
+    ),
+)
+
+
 def process_user_input(user_input: str):
     toolkit = create_sql_database_toolkit()
     graph = build_graph(toolkit)
@@ -312,13 +365,18 @@ def process_user_input(user_input: str):
         narration=None
     )
 
-    for step in graph.stream(initial_state):
-        current_node, current_state = list(step.items())[0]
-        if current_node == "execute_query":
-            current_state = execute_query(current_state, toolkit)
+    try:
+        for step in graph.stream(initial_state):
+            current_node, current_state = list(step.items())[0]
+            logger.info(f"Executing node: {current_node}")
+            if current_node == "execute_query":
+                current_state = execute_query(current_state, toolkit)
 
-    final_state = list(step.values())[0]
-    return final_state["visualization_data"], final_state["narration"]
+        final_state = list(step.values())[0]
+        return final_state["visualization_data"], final_state["narration"]
+    except Exception as e:
+        logger.error(f"Error processing user input: {str(e)}")
+        return None, f"An error occurred while processing your request: {str(e)}"
 
 
 def test_decide_action():
@@ -357,4 +415,7 @@ def test_decide_action():
 
 
 if __name__ == "__main__":
-    test_decide_action()
+    # test_decide_action()
+    import uvicorn
+
+    uvicorn.run(app, host="localhost", port=8000)
