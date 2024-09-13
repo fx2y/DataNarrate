@@ -14,3 +14,4 @@ langfuse
 plotly
 python-fasthtml
 langserve[all]
+pydantic==1.10.18
