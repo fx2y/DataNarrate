@@ -2,7 +2,6 @@ import ast
 import json
 import logging
 import re
-import uuid
 from functools import lru_cache
 from typing import Dict, Any, Tuple, List, Union
 
@@ -16,12 +15,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 from langserve import add_routes
 
 from datanarrate.config import config
-from insightforge.state import State
+from insightforge.state import State, SchemaState, ResultsState
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -81,10 +81,10 @@ def retrieve_schema(toolkit: SQLDatabaseToolkit) -> Dict[str, Any]:
     return {"schema": schema}
 
 
-def update_state_with_schema(state: State, toolkit: SQLDatabaseToolkit) -> State:
+def update_state_with_schema(state: State, toolkit: SQLDatabaseToolkit) -> SchemaState:
     schema_info = retrieve_schema(toolkit)
-    state["schema"] = schema_info["schema"]
-    return state
+    new_state = {"schema": schema_info["schema"], "state": state}
+    return new_state
 
 
 class DecisionOutput(BaseModel):
@@ -94,7 +94,7 @@ class DecisionOutput(BaseModel):
     sql_query: str = Field(description="The SQL query if decision is 'query'", default="")
 
 
-def decide_action(state: State) -> Tuple[str, str]:
+def decide_action(state: State, schema_state: SchemaState) -> Tuple[str, str]:
     llm = ChatOpenAI(
         model_name=config.LLM_MODEL_NAME,
         openai_api_base=config.OPENAI_API_BASE,
@@ -105,6 +105,7 @@ def decide_action(state: State) -> Tuple[str, str]:
         ("system", REFLECTION_SYSTEM_PROMPT),
         ("system",
          "You are an AI assistant that decides whether to ask for clarification or craft a SQL query based on a user's request and database schema. Respond with either a clarification question or a SQL query."),
+        ("placeholder", "{messages}"),
         ("human", "Database schema: {schema}"),
         ("human", "User request: {request}"),
         ("human",
@@ -112,7 +113,7 @@ def decide_action(state: State) -> Tuple[str, str]:
     ])
 
     response = llm.invoke(prompt.format(
-        schema=state["schema"],
+        schema=schema_state["schema"],
         request=state["messages"][-1].content
     ))
 
@@ -128,19 +129,21 @@ def decide_action(state: State) -> Tuple[str, str]:
     return decision, output
 
 
-def update_state_with_decision(state: State) -> State:
-    decision, output = decide_action(state)
+def update_state_with_decision(schema_state: SchemaState) -> State:
+    state = schema_state["state"]
+    decision, output = decide_action(state, schema_state)
     if decision == "clarify":
-        state["messages"] += [AIMessage(output)]
+        state["messages"] = [AIMessage(output)]
     else:
         state["query"] = output
     return state
 
 
-def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> State:
+def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> ResultsState:
     """
     Execute the SQL query using the SQLDatabaseToolkit and return the results as part of the State.
     """
+    new_state: ResultsState = {"state": state}
     if not state.get("query"):
         raise ValueError("No SQL query found in the state")
 
@@ -152,7 +155,7 @@ def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> State:
         results = db_query_tool.invoke(state["query"])
 
         # Update the state with the query results
-        state["results"] = results
+        new_state["results"] = results
 
         # Log the successful query execution
         logger.info(f"Successfully executed query: {state['query']}")
@@ -161,10 +164,10 @@ def execute_query(state: State, toolkit: SQLDatabaseToolkit) -> State:
         # Handle any errors during query execution
         error_message = f"Error executing query: {str(e)}"
         logger.error(error_message)
-        state["results"] = None
-        state["messages"] += [AIMessage(error_message)]
+        new_state["results"] = []
+        new_state["state"]["messages"] = [AIMessage(error_message)]
 
-    return state
+    return new_state
 
 
 def extract_column_names(query: str) -> list:
@@ -234,7 +237,8 @@ def preprocess_query_results(state: State) -> State:
     return state
 
 
-def generate_visualization_and_narration(state: State) -> State:
+def generate_visualization_and_narration(results_state: ResultsState) -> State:
+    state = results_state["state"]
     llm = ChatOpenAI(
         model_name=config.LLM_MODEL_NAME,
         openai_api_base=config.OPENAI_API_BASE,
@@ -245,12 +249,13 @@ def generate_visualization_and_narration(state: State) -> State:
         ("system", REFLECTION_SYSTEM_PROMPT),
         ("system",
          "You are an AI assistant that generates visualizations and narrations based on data. Provide Plotly JSON for visualization and a narration explaining insights."),
+        ("placeholder", "{messages}"),
         ("human", "Preprocessed data: {preprocessed_data}"),
         ("human",
          "Generate a visualization and narration. Use <visualization></visualization> tags for Plotly JSON and <narration></narration> tags for the narration.")
     ])
 
-    response = llm.invoke(prompt.format(preprocessed_data=state["results"]))
+    response = llm.invoke(prompt.format(preprocessed_data=results_state["results"]))
 
     try:
         visualization_match = re.search(r'<visualization>(.*?)</visualization>', response.content, re.DOTALL)
@@ -265,13 +270,14 @@ def generate_visualization_and_narration(state: State) -> State:
 
             state["visualization_data"] = visualization_data
             state["narration"] = narration
+            state["messages"] = [AIMessage(narration)]
         else:
             raise ValueError("Visualization or narration not found in the response")
 
     except Exception as e:
         error_message = f"Error generating visualization and narration: {str(e)}"
         logger.error(error_message)
-        state["messages"].append(AIMessage(error_message))
+        state["messages"] = [AIMessage(error_message)]
 
     return state
 
@@ -283,11 +289,8 @@ def build_graph(toolkit) -> Any:
     graph.add_node("retrieve_schema", lambda state: update_state_with_schema(state, toolkit))
     graph.add_node("decide_action", update_state_with_decision)
     graph.add_node("execute_query", lambda state: execute_query(state, toolkit))
-    graph.add_node("preprocess_data", preprocess_query_results)
+    # graph.add_node("preprocess_data", preprocess_query_results)
     graph.add_node("generate_output", generate_visualization_and_narration)
-
-    # Define edges
-    graph.add_edge("retrieve_schema", "decide_action")
 
     # Conditional edge from decide_action
     def route_action(state: State):
@@ -298,14 +301,15 @@ def build_graph(toolkit) -> Any:
 
     graph.add_edge("retrieve_schema", "decide_action")
     graph.add_conditional_edges("decide_action", route_action)
-    graph.add_edge("execute_query", "preprocess_data")
-    graph.add_edge("preprocess_data", "generate_output")
+    graph.add_edge("execute_query", "generate_output")
+    # graph.add_edge("execute_query", "preprocess_data")
+    # graph.add_edge("preprocess_data", "generate_output")
     graph.add_edge("generate_output", END)
 
     # Set the entrypoint
     graph.set_entry_point("retrieve_schema")
 
-    return graph.compile()
+    return graph.compile(checkpointer=MemorySaver())
 
 
 @lru_cache(maxsize=100)
@@ -328,26 +332,22 @@ class Input(BaseModel):
     )
 
 
-class Output(BaseModel):
-    output: Any
-
-
 def inp(inpt: Input) -> dict:
     return {"messages": inpt["chat_history"] + [HumanMessage(inpt["input"])]}
 
 
-def outp(outpt) -> str:
-    return next(iter(outpt.values()))['messages'][-1].content
+def outp(outpt) -> State:
+    if isinstance(outpt, dict):
+        return outpt
+    else:
+        return next(iter(outpt[-1].values()))
 
 
 toolkit = create_sql_database_toolkit()
 
 add_routes(
     app,
-    (RunnableLambda(inp) | build_graph(toolkit) | RunnableLambda(outp)).with_types(input_type=Input,
-                                                                                   output_type=Output).with_config(
-        {"configurable": {"thread_id": uuid.uuid4()}}
-    ),
+    (RunnableLambda(inp) | build_graph(toolkit) | RunnableLambda(outp)).with_types(input_type=Input, output_type=State)
 )
 
 

@@ -7,9 +7,14 @@ from typing_extensions import TypedDict
 
 class State(TypedDict):
     messages: Annotated[List[AnyMessage], add_messages]
-    schema: Optional[str]
     query: Optional[str]
-    results: Optional[List[dict]]
-    preprocessed_data: Optional[dict]
     visualization_data: Optional[dict]
     narration: Optional[str]
+
+class SchemaState(TypedDict):
+    schema: Optional[str]
+    state: State
+
+class ResultsState(TypedDict):
+    results: List[dict]
+    state: State
